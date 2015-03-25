@@ -26,7 +26,6 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ******************************************************************************/
 #include "StdAfx.h"
-#include "dbghelp/dbghelp.h"
 #include "util.h"
 #include "web_browser.h"
 
@@ -55,7 +54,8 @@ static const TCHAR * CHROME_REQUIRED_OPTIONS[] = {
     _T("--new-window"),
     _T("--disable-translate"),
     _T("--disable-desktop-notifications"),
-    _T("--allow-running-insecure-content")
+    _T("--allow-running-insecure-content"),
+    _T("--disable-save-password-bubble")
 };
 static const TCHAR * CHROME_IGNORE_CERT_ERRORS =
     _T(" --ignore-certificate-errors");
@@ -295,6 +295,37 @@ void WebBrowser::ClearUserData() {
   GetModuleFileName(NULL, path, MAX_PATH);
   lstrcpy(PathFindFileName(path), _T("symbols"));
   DeleteDirectory(path, false);
+
+  // Clean out any old windows update downloads (over 1 month old)
+  const unsigned __int64 TICKS_PER_MONTH = 10000000ui64 * 60ui64 * 60ui64 * 24ui64 * 30L;
+  FILETIME now;
+  GetSystemTimeAsFileTime(&now);
+  ULARGE_INTEGER keep_start;
+  keep_start.LowPart = now.dwLowDateTime;
+  keep_start.HighPart = now.dwHighDateTime;
+  keep_start.QuadPart -= TICKS_PER_MONTH;
+  TCHAR dir[MAX_PATH];
+  GetWindowsDirectory(dir, MAX_PATH);
+  lstrcat(dir, _T("\\SoftwareDistribution\\Download\\"));
+  CString downloads(dir);
+  WIN32_FIND_DATA fd;
+  HANDLE hFind = FindFirstFile(downloads + _T("*.*"), &fd);
+  if (hFind != INVALID_HANDLE_VALUE) {
+    do {
+      if (lstrcmp(fd.cFileName, _T(".")) && lstrcmp(fd.cFileName, _T(".."))) {
+        ULARGE_INTEGER file_time;
+        file_time.LowPart = fd.ftLastWriteTime.dwLowDateTime;
+        file_time.HighPart = fd.ftLastWriteTime.dwHighDateTime;
+        if (file_time.QuadPart < keep_start.QuadPart) {
+          if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            DeleteDirectory(downloads + fd.cFileName, true);
+          else
+            DeleteFile(downloads + fd.cFileName);
+        }
+      }
+    } while (FindNextFile(hFind, &fd));
+    FindClose(hFind);
+  }
 }
 
 /*-----------------------------------------------------------------------------
