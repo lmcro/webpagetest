@@ -55,7 +55,7 @@ else
         {
             if( strlen($labels) )
                 $labels .= ", ";
-            $labels .= $test['name'];
+            $labels .= htmlspecialchars($test['name']);
         }
     }
     if( strlen($labels) )
@@ -88,10 +88,10 @@ else
                 $bgcolor = '000000';
                 $color = 'ffffff';
                 if (array_key_exists('bg', $_GET)) {
-                    $bgcolor = $_GET['bg'];
+                    $bgcolor = preg_replace('/[^0-9a-fA-F]/', '', $_GET['bg']);
                 }
                 if (array_key_exists('text', $_GET)) {
-                    $color = $_GET['text'];
+                    $color = preg_replace('/[^0-9a-fA-F]/', '', $_GET['text']);
                 }
             ?>
                 #video
@@ -345,7 +345,7 @@ function ScreenShotTable()
     global $supports60fps;
     $endTime = 'visual';
     if( array_key_exists('end', $_REQUEST) && strlen($_REQUEST['end']) )
-        $endTime = trim($_REQUEST['end']);
+        $endTime = htmlspecialchars(trim($_REQUEST['end']));
 
     $filmstrip_end_time = 0;
     if( count($tests) )
@@ -362,6 +362,12 @@ function ScreenShotTable()
         echo '<form id="createForm" name="create" method="get" action="/video/create.php">';
         echo "<input type=\"hidden\" name=\"end\" value=\"$endTime\">";
         echo '<input type="hidden" name="tests" value="' . htmlspecialchars($_REQUEST['tests']) . '">';
+        echo "<input type=\"hidden\" name=\"bg\" value=\"$bgcolor\">";
+        echo "<input type=\"hidden\" name=\"text\" value=\"$color\">";
+        if (isset($_REQUEST['labelHeight']) && is_numeric($_REQUEST['labelHeight']))
+          echo '<input type="hidden" name="labelHeight" value="' . htmlspecialchars($_REQUEST['labelHeight']) . '">"';
+        if (isset($_REQUEST['timeHeight']) && is_numeric($_REQUEST['timeHeight']))
+          echo '<input type="hidden" name="timeHeight" value="' . htmlspecialchars($_REQUEST['timeHeight']) . '">"';
         echo '<table id="videoContainer"><tr>';
 
         // build a table with the labels
@@ -398,9 +404,9 @@ function ScreenShotTable()
                 else
                     $href = "/details.php?test={$test['id']}&run={$test['run']}&cached={$test['cached']}";
 
-                echo "<a class=\"pagelink\" id=\"label_{$test['id']}\" href=\"$href\">" . WrapableString($test['name']) . '</a>';
+                echo "<a class=\"pagelink\" id=\"label_{$test['id']}\" href=\"$href\">" . WrapableString(htmlspecialchars($test['name'])) . '</a>';
             } else {
-                echo WrapableString($test['name']);
+                echo WrapableString(htmlspecialchars($test['name']));
             }
 
             // Print out a link to edit the test
@@ -477,7 +483,7 @@ function ScreenShotTable()
                         $cached = '_cached';
                     $imgPath = GetTestPath($test['id']) . "/video_{$test['run']}$cached/$path";
                     echo "<a href=\"/$imgPath\">";
-                    echo "<img title=\"{$test['name']}\"";
+                    echo "<img title=\"" . htmlspecialchars($test['name']) . "\"";
                     $class = 'thumb';
                     if ($lastThumb != $path) {
                         if( !$firstFrame || $frameCount < $firstFrame )
@@ -506,7 +512,7 @@ function ScreenShotTable()
         // end of the container table
         echo "</td></tr></table>\n";
         echo "<div id=\"image\">";
-        echo "<a id=\"export\" class=\"pagelink\" href=\"filmstrip.php?tests={$_REQUEST['tests']}&thumbSize=$thumbSize&ival=$interval&end=$endTime&text=$color&bg=$bgcolor\">Export filmstrip as an image...</a>";
+        echo "<a id=\"export\" class=\"pagelink\" href=\"filmstrip.php?tests=" . htmlspecialchars($_REQUEST['tests']) . "&thumbSize=$thumbSize&ival=$interval&end=$endTime&text=$color&bg=$bgcolor\">Export filmstrip as an image...</a>";
         echo "</div>";
         echo '<div id="bottom"><input type="checkbox" name="slow" value="1"> Slow Motion<br><br>';
         echo "<input id=\"SubmitBtn\" type=\"submit\" value=\"Create Video\">";
@@ -517,7 +523,7 @@ function ScreenShotTable()
         <div id="layout">
             <form id="layoutForm" name="layout" method="get" action="/video/compare.php">
             <?php
-                echo "<input type=\"hidden\" name=\"tests\" value=\"{$_REQUEST['tests']}\">\n";
+                echo "<input type=\"hidden\" name=\"tests\" value=\"" . htmlspecialchars($_REQUEST['tests']) . "\">\n";
             ?>
                 <table id="layoutTable">
                     <tr><th>Thumbnail Size</th><th>Thumbnail Interval</th><th>Comparison End Point</th></th></tr>
@@ -626,12 +632,15 @@ function ScreenShotTable()
             <tr><td>Specific End Time</td><td>-e:&lt;seconds&gt;</td><td>110606_MJ_RZEY-e:1.1</td></tr>
             </table>
             <br>
+            <p>You can also customize the background and text color by passing HTML color values to <b>bg</b> and <b>text</b> query parameters.</p>
             <p>Examples:</p>
             <ul>
             <li><b>Customizing labels:</b>
             http://www.webpagetest.org/video/compare.php?tests=110606_MJ_RZEY-l:Original,110606_AE_RZN5-l:No+JS</li>
             <li><b>Compare First vs. Repeat view:</b>
             http://www.webpagetest.org/video/compare.php?tests=110606_MJ_RZEY, 110606_MJ_RZEY-c:1</li>
+            <li><b>White background with black text:</b>
+            http://www.webpagetest.org/video/compare.php?tests=110606_MJ_RZEY, 110606_MJ_RZEY-c:1&bg=ffffff&text=000000</li>
             </ul>
             <input id="advanced-ok" type=button class="simplemodal-close" value="OK">
         </div>
@@ -661,7 +670,7 @@ function DisplayStatus()
     echo "<table id=\"statusTable\"><tr><th>Test</th><th>Status</th></tr><tr>";
     foreach($tests as &$test)
     {
-        echo "<tr><td><a href=\"/result/{$test['id']}/\">{$test['name']}</a></td><td>";
+        echo "<tr><td><a href=\"/result/{$test['id']}/\">" . htmlspecialchars($test['name']) . "</a></td><td>";
         if( $test['done'] )
             echo "Done";
         elseif( $test['started'] )
@@ -753,9 +762,10 @@ function DisplayGraphs() {
             dataBytes.addColumn('string', 'MIME Type');
             <?php
             foreach($tests as &$test) {
-                echo "dataTimes.addColumn('number', '{$test['name']}');\n";
-                echo "dataRequests.addColumn('number', '{$test['name']}');\n";
-                echo "dataBytes.addColumn('number', '{$test['name']}');\n";
+                $name = htmlspecialchars($test['name']);
+                echo "dataTimes.addColumn('number', '$name');\n";
+                echo "dataRequests.addColumn('number', '$name');\n";
+                echo "dataBytes.addColumn('number', '$name');\n";
             }
             echo 'dataTimes.addRows(' . count($timeMetrics) . ");\n";
             echo 'dataRequests.addRows(' . strval(count($mimeTypes) + 1) . ");\n";
@@ -764,7 +774,7 @@ function DisplayGraphs() {
                 echo "var dataProgress = google.visualization.arrayToDataTable([\n";
                 echo "  ['Time (ms)'";
                 foreach($tests as &$test)
-                    echo ", '{$test['name']}'";
+                    echo ", '" . htmlspecialchars($test['name']) . "'";
                 echo " ]";
                 for ($ms = 0; $ms <= $progress_end; $ms += 100) {
                     echo ",\n  ['" . number_format($ms / 1000, 1) . "'";

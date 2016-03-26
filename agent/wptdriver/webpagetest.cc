@@ -28,7 +28,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "StdAfx.h"
 #include "webpagetest.h"
-#include <Wininet.h>
 #include <Wincrypt.h>
 #include <Shellapi.h>
 #include <IPHlpApi.h>
@@ -73,6 +72,19 @@ WebPagetest::WebPagetest(WptSettings &settings, WptStatus &status):
       delete [] pVersion;
     }
   }
+  // Get the OS platform and version
+  #pragma warning(disable:4996) // deprecated GetVersionEx
+  OSVERSIONINFOEX osvi;
+  ZeroMemory(&osvi, sizeof(OSVERSIONINFOEX));
+  osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
+  GetVersionEx((LPOSVERSIONINFO)&osvi);
+  _winMajor = osvi.dwMajorVersion;
+  _winMinor = osvi.dwMinorVersion;
+  _isServer = osvi.wProductType == VER_NT_WORKSTATION ? 0 : 1;
+  BOOL isWow64 = FALSE;
+  IsWow64Process(GetCurrentProcess(), &isWow64);
+  _is64Bit = isWow64 ? 1 : 0;
+
   // get the computer name (and escape it)
   TCHAR name[MAX_COMPUTERNAME_LENGTH + 1];
   DWORD len = _countof(name);
@@ -85,6 +97,9 @@ WebPagetest::WebPagetest(WptSettings &settings, WptStatus &status):
       _computer_name = escaped;
   }
   UpdateDNSServers();
+
+  _screenWidth = GetSystemMetrics(SM_CXSCREEN);
+  _screenHeight = GetSystemMetrics(SM_CYSCREEN);
 }
 
 /*-----------------------------------------------------------------------------
@@ -109,7 +124,9 @@ bool WebPagetest::GetTest(WptTestDriver& test) {
   // build the url for the request
   CString buff;
   CString url = _settings._server + _T("work/getwork.php?shards=1&reboot=1");
-  url += CString(_T("&location=")) + _settings._location;
+  buff.Format(_T("&location=%s&screenwidth=%d&screenheight=%d&winver=%d.%d&winserver=%d&is64bit=%d"),
+              _settings._location, _screenWidth, _screenHeight, _winMajor, _winMinor, _isServer, _is64Bit);
+  url += buff;
   if (_settings._key.GetLength())
     url += CString(_T("&key=")) + _settings._key;
   if (_majorVer || _minorVer || _buildNo || _revisionNo) {
@@ -174,7 +191,7 @@ bool WebPagetest::DeleteIncrementalResults(WptTestDriver& test) {
 bool WebPagetest::UploadIncrementalResults(WptTestDriver& test) {
   bool ret = true;
 
-  AtlTrace(_T("[wptdriver] - UploadIncrementalResults"));
+  ATLTRACE(_T("[wptdriver] - UploadIncrementalResults"));
 
   if (!test._discard_test) {
     CString directory = test._directory + CString(_T("\\"));
@@ -208,7 +225,7 @@ bool WebPagetest::TestDone(WptTestDriver& test){
     SetCPUUtilization(0);
   }
 
-  AtlTrace(_T("[wptdriver] - Test Done"));
+  ATLTRACE(_T("[wptdriver] - Test Done"));
 
   return ret;
 }
@@ -283,6 +300,77 @@ bool WebPagetest::UploadData(WptTestDriver& test, bool done) {
 }
 
 /*-----------------------------------------------------------------------------
+  Set the credentials required to access the server, if configured
+-----------------------------------------------------------------------------*/
+void WebPagetest::SetLoginCredentials(HINTERNET request) {
+  if (!_settings._username.IsEmpty() && !_settings._password.IsEmpty()) {
+    InternetSetOption(request, INTERNET_OPTION_USERNAME,
+      (LPVOID)(PCTSTR)(_settings._username), _settings._username.GetLength() + 1);
+    InternetSetOption(request, INTERNET_OPTION_PASSWORD,
+      (LPVOID)(PCTSTR)(_settings._password), _settings._password.GetLength() + 1);
+  }
+}
+
+/*-----------------------------------------------------------------------------
+  Retrieves a client certificate from the Personal certificate store.  Gets the
+  first certificate, or the certificate that matches the common name specified
+  in the settings
+-----------------------------------------------------------------------------*/
+void WebPagetest::LoadClientCertificateFromStore(HINTERNET request) {
+  HCERTSTORE hMyStore = CertOpenSystemStore(0, _T("MY"));
+
+  if (!hMyStore)
+    return;
+
+  PCCERT_CONTEXT pDesiredCert = NULL;
+  if (!_settings._clientCertCommonName.IsEmpty()) {
+    CERT_RDN cert_rdn;
+    CERT_RDN_ATTR cert_rdn_attr;
+
+    cert_rdn.cRDNAttr = 1;
+    cert_rdn.rgRDNAttr = &cert_rdn_attr;
+
+    _settings._clientCertCommonName;
+    cert_rdn_attr.pszObjId = szOID_COMMON_NAME;
+    cert_rdn_attr.dwValueType = CERT_RDN_ANY_TYPE;
+    cert_rdn_attr.Value.cbData = _settings._clientCertCommonName.GetLength();
+
+    LPSTR pCommonName = new char[_settings._clientCertCommonName.GetLength() + 1];
+    WideCharToMultiByte(CP_ACP, 0, _settings._clientCertCommonName, -1, pCommonName, _settings._clientCertCommonName.GetLength() + 1, NULL, NULL);
+    cert_rdn_attr.Value.pbData = (BYTE *)pCommonName;
+
+    pDesiredCert = CertFindCertificateInStore(
+      hMyStore,
+      X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+      0,
+      CERT_FIND_SUBJECT_ATTR,
+      &cert_rdn,
+      NULL);
+
+    delete[] pCommonName;
+  }
+  else {
+    // use the first certificate in the store
+    pDesiredCert = CertFindCertificateInStore(
+      hMyStore,
+      X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+      0,
+      NULL,
+      NULL,
+      NULL);
+  }
+
+  if (pDesiredCert) {
+    InternetSetOption(request, INTERNET_OPTION_CLIENT_CERT_CONTEXT,
+      (LPVOID)pDesiredCert, sizeof(CERT_CONTEXT));
+    CertFreeCertificateContext(pDesiredCert);
+  }
+
+  if (hMyStore)
+    CertCloseStore(hMyStore, 0);
+}
+
+/*-----------------------------------------------------------------------------
   Perform a http GET operation and return the body as a string
 -----------------------------------------------------------------------------*/
 bool WebPagetest::HttpGet(CString url, WptTestDriver& test,
@@ -304,43 +392,64 @@ bool WebPagetest::HttpGet(CString url, WptTestDriver& test,
                       &timeout, sizeof(timeout));
     CString host, object;
     unsigned short port;
-    DWORD secure_flag;
-    if (CrackUrl(url, host, port, object, secure_flag)) {
-      HINTERNET http_request = InternetOpenUrl(internet, url, NULL, 0, 
-                                  INTERNET_FLAG_NO_CACHE_WRITE | 
-                                  INTERNET_FLAG_NO_UI | 
-                                  INTERNET_FLAG_PRAGMA_NOCACHE | 
-                                  INTERNET_FLAG_RELOAD |
-                                  secure_flag, NULL);
-      if (http_request) {
-        TCHAR mime_type[1024] = TEXT("\0");
-        DWORD len = _countof(mime_type);
-        if (HttpQueryInfo(http_request,HTTP_QUERY_CONTENT_TYPE, mime_type, 
-                            &len, NULL)) {
-          result = true;
-          bool is_zip = false;
-          char buff[4097];
-          DWORD bytes_read, bytes_written;
-          HANDLE file = INVALID_HANDLE_VALUE;
-          if (!lstrcmpi(mime_type, _T("application/zip"))) {
-            zip_file = test._directory + _T("\\wpt.zip");
-            file = CreateFile(zip_file,GENERIC_WRITE,0,0,CREATE_ALWAYS,0,NULL);
-            is_zip = true;
+    DWORD secure_flags;
+    if (CrackUrl(url, host, port, object, secure_flags)) {
+      HINTERNET connect = InternetConnect(internet, host, port, NULL, NULL,
+        INTERNET_SERVICE_HTTP, 0, 0);
+      if (connect) {
+        HINTERNET request = HttpOpenRequest(connect, _T("GET"), object, NULL, NULL, NULL,
+          INTERNET_FLAG_NO_CACHE_WRITE |
+          INTERNET_FLAG_NO_UI |
+          INTERNET_FLAG_PRAGMA_NOCACHE |
+          INTERNET_FLAG_RELOAD | 
+          INTERNET_FLAG_KEEP_CONNECTION | 
+          secure_flags, 0);
+        if (request) {
+
+          SetLoginCredentials(request);
+          BOOL send_request_result = HttpSendRequest(request, NULL, 0, NULL, 0);
+          if (!send_request_result) {
+            DWORD dwError = GetLastError();
+            if (dwError == ERROR_INTERNET_CLIENT_AUTH_CERT_NEEDED) {
+              LoadClientCertificateFromStore(request);
+              send_request_result = HttpSendRequest(request, NULL, 0, NULL, 0);
+            } 
           }
-          while (InternetReadFile(http_request, buff, sizeof(buff) - 1, 
-                  &bytes_read) && bytes_read) {
-            if (is_zip) {
-              WriteFile(file, buff, bytes_read, &bytes_written, 0);
-            } else {
-              // NULL-terminate it and add it to our response string
-              buff[bytes_read] = 0;
-              test_string += CA2T(buff, CP_UTF8);
+
+          if (send_request_result) {
+            TCHAR mime_type[1024] = TEXT("\0");
+            DWORD len = _countof(mime_type);
+
+            if (HttpQueryInfo(request, HTTP_QUERY_CONTENT_TYPE, mime_type,
+              &len, NULL)) {
+              result = true;
+              bool is_zip = false;
+              char buff[4097];
+              DWORD bytes_read, bytes_written;
+              HANDLE file = INVALID_HANDLE_VALUE;
+              if (!lstrcmpi(mime_type, _T("application/zip"))) {
+                zip_file = test._directory + _T("\\wpt.zip");
+                file = CreateFile(zip_file, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, NULL);
+                is_zip = true;
+              }
+              while (InternetReadFile(request, buff, sizeof(buff) - 1,
+                &bytes_read) && bytes_read) {
+                if (is_zip) {
+                  WriteFile(file, buff, bytes_read, &bytes_written, 0);
+                }
+                else {
+                  // NULL-terminate it and add it to our response string
+                  buff[bytes_read] = 0;
+                  test_string += CA2T(buff, CP_UTF8);
+                }
+              }
+              if (file != INVALID_HANDLE_VALUE)
+                CloseHandle(file);
             }
           }
-          if (file != INVALID_HANDLE_VALUE)
-            CloseHandle(file);
+          InternetCloseHandle(request);
         }
-        InternetCloseHandle(http_request);
+        InternetCloseHandle(connect);
       }
     }
     InternetCloseHandle(internet);
@@ -374,7 +483,7 @@ bool WebPagetest::UploadFile(CString url, bool done, WptTestDriver& test,
     }
   }
 
-  AtlTrace(_T("[wptdriver] - Uploading '%s' (%d bytes) to '%s'"), (LPCTSTR)file, file_size, (LPCTSTR)url);
+  ATLTRACE(_T("[wptdriver] - Uploading '%s' (%d bytes) to '%s'"), (LPCTSTR)file, file_size, (LPCTSTR)url);
 
   BuildFormData(_settings, test, done, file_name, file_size, 
                 headers, footer, form_data, content_length);
@@ -399,11 +508,11 @@ bool WebPagetest::UploadFile(CString url, bool done, WptTestDriver& test,
     unsigned short port;
     DWORD secure_flag;
     if (CrackUrl(url, host, port, object, secure_flag)) {
-      AtlTrace(_T("[wptdriver] - Connecting to '%s' port %d"), (LPCTSTR)host, port);
+      ATLTRACE(_T("[wptdriver] - Connecting to '%s' port %d"), (LPCTSTR)host, port);
       HINTERNET connect = InternetConnect(internet, host, port, NULL, NULL,
                                           INTERNET_SERVICE_HTTP, 0, 0);
       if (connect) {
-        AtlTrace(_T("[wptdriver] - POSTing to %s"), (LPCTSTR)object);
+        ATLTRACE(_T("[wptdriver] - POSTing to %s"), (LPCTSTR)object);
         HINTERNET request = HttpOpenRequest(connect, _T("POST"), object, 
                                               NULL, NULL, NULL, 
                                               INTERNET_FLAG_NO_CACHE_WRITE |
@@ -413,6 +522,7 @@ bool WebPagetest::UploadFile(CString url, bool done, WptTestDriver& test,
                                               INTERNET_FLAG_KEEP_CONNECTION |
                                               secure_flag, NULL);
         if (request) {
+          SetLoginCredentials(request);
           if (HttpAddRequestHeaders(request, headers, headers.GetLength(), 
                                     HTTP_ADDREQ_FLAG_ADD |
                                     HTTP_ADDREQ_FLAG_REPLACE)) {
@@ -420,13 +530,22 @@ bool WebPagetest::UploadFile(CString url, bool done, WptTestDriver& test,
             memset( &buffers, 0, sizeof(buffers) );
             buffers.dwStructSize = sizeof(buffers);
             buffers.dwBufferTotal = content_length;
-            AtlTrace(_T("[wptdriver] - Sending request"));
-            if (HttpSendRequestEx(request, &buffers, NULL, 0, NULL)) {
+            ATLTRACE(_T("[wptdriver] - Sending request"));
+            BOOL send_request_result = HttpSendRequestEx(request, &buffers, NULL, 0, NULL);
+            if (!send_request_result) {
+              DWORD dwError = GetLastError();
+              if (dwError == ERROR_INTERNET_CLIENT_AUTH_CERT_NEEDED) {
+                LoadClientCertificateFromStore(request);
+                send_request_result = HttpSendRequestEx(request, &buffers, NULL, 0, NULL);
+              }
+            }
+
+            if (send_request_result) {
               DWORD bytes_written;
-              AtlTrace(_T("[wptdriver] - Writing data"));
+              ATLTRACE(_T("[wptdriver] - Writing data"));
               if (InternetWriteFile(request, (LPCSTR)form_data, 
                                     form_data.GetLength(), &bytes_written)) {
-                AtlTrace(_T("[wptdriver] - Uploading the file"));
+                ATLTRACE(_T("[wptdriver] - Uploading the file"));
                 // upload the file itself
                 if (file_handle != INVALID_HANDLE_VALUE && file_size) {
                     DWORD chunkSize = min(64 * 1024, file_size);
@@ -450,10 +569,10 @@ bool WebPagetest::UploadFile(CString url, bool done, WptTestDriver& test,
                   }
                 }
               } else {
-                AtlTrace(_T("InternetWriteFile failed: %d"), GetLastError());
+                ATLTRACE(_T("InternetWriteFile failed: %d"), GetLastError());
               }
             } else {
-              AtlTrace(_T("HttpSendRequestEx failed: %d"), GetLastError());
+              ATLTRACE(_T("HttpSendRequestEx failed: %d"), GetLastError());
             }
           }
           InternetCloseHandle(request);
@@ -470,7 +589,7 @@ bool WebPagetest::UploadFile(CString url, bool done, WptTestDriver& test,
   if (ret)
     DeleteFile(file);
 
-  AtlTrace(_T("[wptdriver] - Upload %s"), ret ? _T("SUCCEEDED") : _T("FAILED"));
+  ATLTRACE(_T("[wptdriver] - Upload %s"), ret ? _T("SUCCEEDED") : _T("FAILED"));
 
   return ret;
 }
@@ -512,9 +631,11 @@ bool WebPagetest::CrackUrl(CString url, CString &host, unsigned short &port,
       object = path;
       object += extra;
       if (!lstrcmpi(scheme, _T("https"))) {
-        secure_flag = INTERNET_FLAG_SECURE |
-                      INTERNET_FLAG_IGNORE_CERT_CN_INVALID |
-                      INTERNET_FLAG_IGNORE_CERT_DATE_INVALID;
+        secure_flag = INTERNET_FLAG_SECURE;
+        if (!_settings._requireValidCertificate) {
+          secure_flag |= INTERNET_FLAG_IGNORE_CERT_CN_INVALID |
+          INTERNET_FLAG_IGNORE_CERT_DATE_INVALID;
+        }
         if (!port)
           port = INTERNET_DEFAULT_HTTPS_PORT;
       } else if (!port)

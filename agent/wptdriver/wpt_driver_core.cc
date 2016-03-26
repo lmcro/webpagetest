@@ -70,6 +70,7 @@ WptDriverCore::WptDriverCore(WptStatus &status):
   ,_installing(false)
   ,_settings(status) {
   global_core = this;
+  reboot_time_.QuadPart = 0;
   _testing_mutex = CreateMutex(NULL, FALSE, _T("Global\\WebPagetest"));
   has_gpu_ = DetectGPU();
   _webpagetest.has_gpu_ = has_gpu_;
@@ -172,7 +173,7 @@ void WptDriverCore::WorkThread(void) {
 
     _status.Set(_T("Running..."));
   }
-  while (!_exit) {
+  while (!_exit && !NeedsReboot()) {
     WaitForSingleObject(_testing_mutex, INFINITE);
     _status.Set(_T("Checking for software updates..."));
     _installing = true;
@@ -339,6 +340,16 @@ void WptDriverCore::Init(void){
     RegCloseKey(hKey);
   }
 
+  // Set it to reboot automatically with Windows updates
+  if (SUCCEEDED(RegOpenKeyEx(HKEY_LOCAL_MACHINE, 
+      _T("SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU"), 0, 
+      KEY_SET_VALUE, &hKey))) {
+    DWORD val = 1;
+    RegSetValueEx(hKey, _T("AlwaysAutoRebootAtScheduledTime"), 0, REG_DWORD, 
+                  (LPBYTE)&val, sizeof(val));
+    RegCloseKey(hKey);
+  }
+
   ExtractZipFiles();
 
   // register the IE BHO if it is in the directory
@@ -394,6 +405,8 @@ void WptDriverCore::Init(void){
     _status.Set(_T("Installing software..."));
   }
   _installing = false;
+
+  SetupScreen();
 
   // start the background timer that does our housekeeping
   CreateTimerQueueTimer(&housekeeping_timer_, NULL, ::DoHouseKeeping, this, 
@@ -588,60 +601,62 @@ void WptDriverCore::KillBrowsers() {
   Set the screen resolution if it is currently too low
 -----------------------------------------------------------------------------*/
 void WptDriverCore::SetupScreen(void) {
-  DEVMODE mode;
-  memset(&mode, 0, sizeof(mode));
-  mode.dmSize = sizeof(mode);
-  CStringA settings;
-  DWORD x = 0, y = 0, bpp = 0;
+  if (!_settings._keep_resolution) {
+    DEVMODE mode;
+    memset(&mode, 0, sizeof(mode));
+    mode.dmSize = sizeof(mode);
+    CStringA settings;
+    DWORD x = 0, y = 0, bpp = 0;
 
-  int index = 0;
-  DWORD targetWidth = 1920;
-  DWORD targetHeight = 1200;
-  DWORD min_bpp = 15;
-  while( EnumDisplaySettings( NULL, index, &mode) ) {
-    index++;
-    bool use_mode = false;
-    if (x >= targetWidth && y >= targetHeight && bpp >= 24) {
-      // we already have at least one suitable resolution.  
-      // Make sure we didn't overshoot and pick too high of a resolution
-      // or see if a higher bpp is available
-      if (mode.dmPelsWidth >= targetWidth && mode.dmPelsWidth <= x &&
-          mode.dmPelsHeight >= targetHeight && mode.dmPelsHeight <= y &&
-          mode.dmBitsPerPel >= bpp)
-        use_mode = true;
-    } else {
-      if (mode.dmPelsWidth == x && mode.dmPelsHeight == y) {
-        if (mode.dmBitsPerPel >= bpp)
+    int index = 0;
+    DWORD targetWidth = 1920;
+    DWORD targetHeight = 1200;
+    DWORD min_bpp = 15;
+    while( EnumDisplaySettings( NULL, index, &mode) ) {
+      index++;
+      bool use_mode = false;
+      if (x >= targetWidth && y >= targetHeight && bpp >= 24) {
+        // we already have at least one suitable resolution.  
+        // Make sure we didn't overshoot and pick too high of a resolution
+        // or see if a higher bpp is available
+        if (mode.dmPelsWidth >= targetWidth && mode.dmPelsWidth <= x &&
+            mode.dmPelsHeight >= targetHeight && mode.dmPelsHeight <= y &&
+            mode.dmBitsPerPel >= bpp)
           use_mode = true;
-      } else if ((mode.dmPelsWidth >= targetWidth ||
-                  mode.dmPelsWidth >= x) &&
-                 (mode.dmPelsHeight >= targetHeight ||
-                  mode.dmPelsHeight >= y) && 
-                 mode.dmBitsPerPel >= min_bpp) {
-          use_mode = true;
+      } else {
+        if (mode.dmPelsWidth == x && mode.dmPelsHeight == y) {
+          if (mode.dmBitsPerPel >= bpp)
+            use_mode = true;
+        } else if ((mode.dmPelsWidth >= targetWidth ||
+                    mode.dmPelsWidth >= x) &&
+                   (mode.dmPelsHeight >= targetHeight ||
+                    mode.dmPelsHeight >= y) && 
+                   mode.dmBitsPerPel >= min_bpp) {
+            use_mode = true;
+        }
+      }
+      if (use_mode) {
+          x = mode.dmPelsWidth;
+          y = mode.dmPelsHeight;
+          bpp = mode.dmBitsPerPel;
       }
     }
-    if (use_mode) {
-        x = mode.dmPelsWidth;
-        y = mode.dmPelsHeight;
-        bpp = mode.dmBitsPerPel;
-    }
-  }
 
-  // get the current settings
-  if (x && y && bpp && 
-    EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &mode)) {
-    if (mode.dmPelsWidth < x || 
-        mode.dmPelsHeight < y || 
-        mode.dmBitsPerPel < bpp) {
-      DEVMODE newMode;
-      memcpy(&newMode, &mode, sizeof(mode));
+    // get the current settings
+    if (x && y && bpp && 
+      EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &mode)) {
+      if (mode.dmPelsWidth < x || 
+          mode.dmPelsHeight < y || 
+          mode.dmBitsPerPel < bpp) {
+        DEVMODE newMode;
+        memcpy(&newMode, &mode, sizeof(mode));
       
-      newMode.dmFields = DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT;
-      newMode.dmBitsPerPel = bpp;
-      newMode.dmPelsWidth = x;
-      newMode.dmPelsHeight = y;
-      ChangeDisplaySettings( &newMode, CDS_UPDATEREGISTRY | CDS_GLOBAL );
+        newMode.dmFields = DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT;
+        newMode.dmBitsPerPel = bpp;
+        newMode.dmPelsWidth = x;
+        newMode.dmPelsHeight = y;
+        ChangeDisplaySettings( &newMode, CDS_UPDATEREGISTRY | CDS_GLOBAL );
+      }
     }
   }
 }
@@ -912,4 +927,39 @@ LPTSTR WptDriverCore::GetAppInitString(LPCTSTR new_dll) {
   }
 
   return dlls;
+}
+
+/*-----------------------------------------------------------------------------
+  Check to see if a reboot is needed for some reason.
+  (right now just pending windows updates)
+-----------------------------------------------------------------------------*/
+bool WptDriverCore::NeedsReboot() {
+  HKEY key;
+
+  if (reboot_time_.QuadPart != 0) {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    if (now.QuadPart >= reboot_time_.QuadPart) {
+      _exit = true;
+      Reboot();
+    }
+  } else {
+    bool needs_reboot = false;
+    if (ERROR_SUCCESS == RegOpenKeyEx(HKEY_LOCAL_MACHINE,
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate"
+        L"\\Auto Update\\RebootRequired", 0, 0, &key)) {
+      needs_reboot = true;
+      RegCloseKey(key);
+    }
+
+    if (needs_reboot) {
+      // schedule a reboot for 1 hour from now to allow updates to finish installing
+      LARGE_INTEGER now, freq;
+      QueryPerformanceCounter(&now);
+      QueryPerformanceFrequency(&freq);
+      reboot_time_.QuadPart = now.QuadPart + (freq.QuadPart * 3600);
+    }
+  }
+
+  return _exit;
 }

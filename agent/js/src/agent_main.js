@@ -28,7 +28,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 var browser_base = require('browser_base');
 var child_process = require('child_process');
+var crypto = require('crypto');
 var fs = require('fs');
+var http = require('http');
 var logger = require('logger');
 var nopt = require('nopt');
 var path = require('path');
@@ -48,11 +50,15 @@ var wpt_client = require('wpt_client');
  */
 var knownOpts = {
   serverUrl: [String, null],
+  insecure: Boolean,
+  clientCert: [String, null],
+  clientCertPass: [String, null],
   location: [String, null],
   deviceAddr: [String, null],
   deviceSerial: [String, null],
   jobTimeout: [Number, null],
-  apiKey: [String, null]
+  apiKey: [String, null],
+  exitTests: [Number, null]
 };
 
 var WD_SERVER_EXIT_TIMEOUT = 5000;  // Wait for 5 seconds before force-killing
@@ -72,10 +78,17 @@ function Agent(app, client, flags) {
   // The directory to store run result files. Clean it up before+after each run.
   // We want a fixed name, to avoid leaving junk after agent crashes/restarts.
   var runTempSuffix = flags.deviceSerial || '';
-  if (!/^[a-z0-9]*$/i.test(runTempSuffix)) {
+  if (!/^[a-z0-9\-]*$/i.test(runTempSuffix)) {
     throw new Error('--deviceSerial may contain only letters and digits');
   }
-  this.runTempDir_ = 'runtmp/' + (runTempSuffix || '_wpt');
+  this.runTempRoot_ = 'runtmp/' + (runTempSuffix || '_wpt');
+  deleteFolderRecursive(this.runTempRoot_);
+  this.runTempDir_ = this.runTempRoot_;
+  this.workDir_ = 'work/' + (runTempSuffix || '_wpt');
+  this.scheduleCleanWorkDir_();
+  this.aliveFile_ = undefined;
+  if (flags.alive)
+    this.aliveFile_ = flags.alive + '.alive';
   this.wdServer_ = undefined;  // The wd_server child process.
   this.webPageReplay_ = new web_page_replay.WebPageReplay(this.app_,
       {flags: flags});
@@ -84,10 +97,11 @@ function Agent(app, client, flags) {
   this.browser_ = browser_base.createBrowser(this.app_,
       {flags: flags, task: {}});
 
+  this.client_.onPrepareJob = this.prepareJob_.bind(this);
   this.client_.onStartJobRun = this.startJobRun_.bind(this);
   this.client_.onAbortJob = this.abortJob_.bind(this);
-  this.client_.onMakeReady =
-      this.browser_.scheduleMakeReady.bind(this.browser_);
+  this.client_.onMakeReady = this.onMakeReady_.bind(this);
+  this.client_.onAlive = this.onAlive_.bind(this);
 }
 /** Public class. */
 exports.Agent = Agent;
@@ -109,6 +123,22 @@ Agent.prototype.run = function() {
 Agent.prototype.scheduleNoFault_ = function(description, f) {
   'use strict';
   return process_utils.scheduleNoFault(this.app_, description, f);
+};
+
+var deleteFolderRecursive = function(path) {
+  try {
+    if (fs.existsSync(path)) {
+      fs.readdirSync(path).forEach(function(file,index){
+        var curPath = path + "/" + file;
+        if(fs.lstatSync(curPath).isDirectory()) { // recurse
+          deleteFolderRecursive(curPath);
+        } else { // delete file
+          fs.unlinkSync(curPath);
+        }
+      });
+      fs.rmdirSync(path);
+    }
+  } catch(e) {}
 };
 
 /**
@@ -153,66 +183,112 @@ Agent.prototype.startWdServer_ = function(job) {
 Agent.prototype.scheduleProcessDone_ = function(ipcMsg, job) {
   'use strict';
   this.app_.schedule('Process job results', function() {
-    if (ipcMsg.devToolsMessages) {
-      job.zipResultFiles['devtools.json'] =
-          JSON.stringify(ipcMsg.devToolsMessages);
+    if (ipcMsg.devToolsFile) {
+      job.zipResultFiles['devtools.json'] = fs.readFileSync(ipcMsg.devToolsFile, "utf8");
+    }
+    if (ipcMsg.customMetrics) {
+      job.zipResultFiles['metrics.json'] = JSON.stringify(ipcMsg.customMetrics);
+    }
+    if (ipcMsg.userTimingMarks) {
+      job.zipResultFiles['timed_events.json'] = JSON.stringify(ipcMsg.userTimingMarks);
+    }
+    if (ipcMsg.pageData) {
+      job.zipResultFiles['page_data.json'] = JSON.stringify(ipcMsg.pageData);
+    }
+    if (ipcMsg.netlogFile) {
+      job.zipResultFiles['netlog.txt'] = fs.readFileSync(ipcMsg.netlogFile, "utf8");
+    }
+    if (ipcMsg.histogramFile) {
+      try {
+        var buffer = fs.readFileSync(ipcMsg.histogramFile);
+        if (buffer) {
+          job.resultFiles.push(new wpt_client.ResultFile(
+              wpt_client.ResultFile.ResultType.IMAGE,
+              'histograms.json.gz',
+              'text/plain',
+              buffer));
+        }
+        fs.unlinkSync(ipcMsg.histogramFile);
+      } catch(e) {}
     }
     if (ipcMsg.traceFile) {
-      process_utils.scheduleFunctionNoFault(this.app_, 'Read trace file',
-          fs.readFile, ipcMsg.traceFile).then(function(buffer) {
-        job.zipResultFiles['trace.json'] = buffer.toString();
-      });
+      try {
+        var buffer = fs.readFileSync(ipcMsg.traceFile);
+        if (buffer) {
+          job.resultFiles.push(new wpt_client.ResultFile(
+              wpt_client.ResultFile.ResultType.TRACE,
+              'trace.json.gz', 'application/x-gzip', buffer));
+        }
+        fs.unlinkSync(ipcMsg.traceFile);
+      } catch(e) {}
     }
     if (ipcMsg.screenshots && ipcMsg.screenshots.length > 0) {
       var imageDescriptors = [];
       ipcMsg.screenshots.forEach(function(screenshot) {
-        logger.debug('Adding screenshot %s', screenshot.fileName);
-        process_utils.scheduleFunctionNoFault(this.app_,
-            'Read ' + screenshot.diskPath,
-            fs.readFile, screenshot.diskPath).then(function(buffer) {
-          job.resultFiles.push(new wpt_client.ResultFile(
-              wpt_client.ResultFile.ResultType.IMAGE,
-              screenshot.fileName,
-              screenshot.contentType,
-              buffer));
-          if (screenshot.description) {
-            imageDescriptors.push({
-              filename: screenshot.fileName,
-              description: screenshot.description
-            });
+        try {
+          logger.debug('Adding screenshot %s', screenshot.fileName);
+          var buffer = fs.readFileSync(screenshot.diskPath);
+          if (buffer) {
+            job.resultFiles.push(new wpt_client.ResultFile(
+                wpt_client.ResultFile.ResultType.IMAGE,
+                screenshot.fileName,
+                screenshot.contentType,
+                buffer));
+            if (screenshot.description) {
+              imageDescriptors.push({
+                filename: screenshot.fileName,
+                description: screenshot.description
+              });
+            }
           }
-        }.bind(this));
+          fs.unlinkSync(screenshot.fileName);
+        } catch(e) {}
       }.bind(this));
       if (imageDescriptors.length > 0) {
         job.zipResultFiles['images.json'] = JSON.stringify(imageDescriptors);
       }
     }
     if (ipcMsg.videoFile) {
-      process_utils.scheduleFunction(this.app_, 'Read video file',
-          fs.readFile, ipcMsg.videoFile).then(function(buffer) {
-        var ext = path.extname(ipcMsg.videoFile);
-        var mimeType = ('.mp4' === ext) ? 'video/mp4' : 'video/avi';
-        job.resultFiles.push(new wpt_client.ResultFile(
-            wpt_client.ResultFile.ResultType.IMAGE,
-            'video' + ext, mimeType, buffer));
-      }, function(e) {
-        logger.error('Unable to read video file: ' + e.message);
-        job.agentError = job.agentError || e.message;
-      });
+      try {
+        var buffer = fs.readFileSync(ipcMsg.videoFile);
+        if (buffer) {
+          var ext = path.extname(ipcMsg.videoFile);
+          var mimeType = ('.mp4' === ext) ? 'video/mp4' : 'video/avi';
+          job.resultFiles.push(new wpt_client.ResultFile(
+              wpt_client.ResultFile.ResultType.IMAGE,
+              'video' + ext, mimeType, buffer));
+        }
+        fs.unlinkSync(ipcMsg.videoFile);
+      } catch(e) {}
+    }
+    if (ipcMsg.videoFrames) {
+      ipcMsg.videoFrames.forEach(function(videoFrame) {
+        try {
+          logger.debug('Adding video frame %s', videoFrame.fileName);
+          var buffer = fs.readFileSync(videoFrame.diskPath);
+          if (buffer) {
+            job.resultFiles.push(new wpt_client.ResultFile(
+                wpt_client.ResultFile.ResultType.IMAGE,
+                videoFrame.fileName,
+                'image/jpeg',
+                buffer));
+          }
+          fs.unlinkSync(videoFrame.diskPath);
+        } catch(e) {}
+      }.bind(this));
     }
     if (ipcMsg.pcapFile) {
-      process_utils.scheduleFunction(this.app_, 'Read pcap file',
-              fs.readFile, ipcMsg.pcapFile).then(function(buffer) {
-        job.resultFiles.push(new wpt_client.ResultFile(
-            wpt_client.ResultFile.ResultType.PCAP,
-            '.cap', 'application/vnd.tcpdump.pcap', buffer));
-      }, function(e) {
-        logger.error('Unable to read pcap file: ' + e.message);
-        job.agentError = job.agentError || e.message;
-      });
-      process_utils.scheduleFunctionNoFault(this.app_, 'Delete pcap file',
-          fs.unlink, ipcMsg.pcapFile);
+      try {
+        var buffer = fs.readFileSync(ipcMsg.pcapFile);
+        if (buffer) {
+          job.resultFiles.push(new wpt_client.ResultFile(
+              wpt_client.ResultFile.ResultType.PCAP,
+              '.cap', 'application/vnd.tcpdump.pcap', buffer));
+        }
+        fs.unlinkSync(ipcMsg.pcapFile);
+      } catch(e) {}
     }
+    this.stopTrafficShaper_();
     if (job.isReplay) {
       this.webPageReplay_.scheduleGetErrorLog().then(function(log) {
         if (log) {
@@ -227,6 +303,101 @@ Agent.prototype.scheduleProcessDone_ = function(ipcMsg, job) {
 };
 
 /**
+ * Do any pre-job preparation
+ *
+ * @param {Job} job the job to prepare.
+ * @private
+ */
+Agent.prototype.prepareJob_ = function(job) {
+  var done = new webdriver.promise.Deferred();
+  process_utils.scheduleNoFault(this.app_, 'Stop WPR', function() {
+    this.webPageReplay_.scheduleStop();
+  }.bind(this));
+  if (job.task.customBrowserUrl && job.task.customBrowserMD5) {
+    var browserName = path.basename(job.task.customBrowserUrl);
+    logger.debug("Custom Browser: " + browserName);
+    this.scheduleCreateDirectory_(this.app_, this.workDir_).then(
+        function() {
+      this.scheduleCreateDirectory_(this.app_,
+          path.join(this.workDir_, 'browsers')).then(function() {
+        job.customBrowser = path.join(this.workDir_, 'browsers',
+            job.task.customBrowserMD5 + '-' + browserName);
+        process_utils.scheduleFunction(this.app_,
+            'Check if browser exists', fs.exists, job.customBrowser).then(
+            function(exists) {
+          if (!exists) {
+            // TODO(pmeenan): Implement a cleanup that deletes custom browsers
+            // that haven't been used in a while
+            logger.debug("Custom Browser not available, downloading from " +
+                job.task.customBrowserUrl);
+            var tempFile = job.customBrowser + '.tmp';
+            try {fs.unlinkSync(tempFile);} catch(e) {}
+            var active = true;
+            var md5 = crypto.createHash('md5');
+            var file = fs.createWriteStream(tempFile);
+            var onError = function(e) {
+              if (active) {
+                active = false;
+                file.end();
+                try {fs.unlinkSync(tempFile);} catch(e) {}
+                e.message = 'Custom browser download failure from ' +
+                    job.task.customBrowserUrl + ': ' + e.message;
+                logger.warn(e.message);
+                done.reject(e);
+              }
+            }.bind(this);
+            var onDone = function() {
+              if (active) {
+                active = false;
+                file.end();
+                var md5hex = md5.digest('hex').toUpperCase();
+                logger.debug('Finished download - md5: ' + md5hex);
+                if (md5hex == job.task.customBrowserMD5.toUpperCase()) {
+                  process_utils.scheduleFunction(this.app_,
+                          'Rename successful browser download',
+                          fs.rename, tempFile, job.customBrowser).then(
+                      function() {
+                    done.fulfill();
+                  }.bind(this), function() {
+                    done.reject(new Error(
+                        'Failed to rename custom browser file'));
+                  }.bind(this));
+                } else {
+                  process_utils.scheduleUnlinkIfExists(this.app_,
+                      tempFile).then(function() {
+                    done.reject(new Error(
+                        'Failed to download custom browser from ' +
+                        job.task.customBrowserUrl));
+                  }.bind(this));
+                }
+              }
+            }.bind(this);
+            var request = http.get(job.task.customBrowserUrl,
+                function(response) {
+              response.pipe(file);
+              response.on('data', function(chunk) {
+                md5.update(chunk);
+              }.bind(this));
+              response.on('error', onError);
+              response.on('end', onDone);
+              response.on('close', onDone);
+            }.bind(this));
+            request.on('error', onError);
+            request.end();
+          } else {
+            logger.debug("Custom Browser already available");
+            done.fulfill();
+          }
+        }.bind(this));
+      }.bind(this));
+    }.bind(this));
+  } else {
+    done.fulfill();
+  }
+  return done.promise;
+};
+
+/**
  * Performs one run of a job in a wd_server module that runs as a child process.
  *
  * Must call job.runFinished() no matter how the run ended.
@@ -237,15 +408,17 @@ Agent.prototype.scheduleProcessDone_ = function(ipcMsg, job) {
 Agent.prototype.startJobRun_ = function(job) {
   'use strict';
   this.app_.schedule('Start run', function() {
+    this.runTempDir_ = this.runTempRoot_ + "/" + job.id + "." + job.runNumber;
+    if (job.isCacheWarm)
+        this.runTempDir_ += ".rv";
     // Validate job
     var script = job.task.script;
     var url = job.task.url;
-    var pac;
     try {
       if (script && !/new\s+(\S+\.)?Builder\s*\(/.test(script)) {
-        var urlAndPac = this.decodeUrlAndPacFromScript_(script);
-        url = urlAndPac.url;
-        pac = urlAndPac.pac;
+        // Nuke any non-webdriver scripts for now.  Regular WPT
+        // scripts would have been pre-processed when the task was
+        // initially parsed.
         script = undefined;
       }
       url = url.trim();
@@ -271,6 +444,13 @@ Agent.prototype.startJobRun_ = function(job) {
       this.scheduleCleanup_(job, /*isEndOfJob=*/false);
     }
     this.scheduleCleanRunTempDir_();
+
+    if (this.isTrafficShaping_(job)) {
+      this.startTrafficShaper_(job);  // Start shaping.
+    } else {
+      this.stopTrafficShaper_();  // clear any traffic shaping.
+    }
+
     if (!job.isCacheWarm) {
       if (job.isReplay) {
         if (job.runNumber === 0) {
@@ -284,16 +464,6 @@ Agent.prototype.startJobRun_ = function(job) {
             this.app_, 'Stop WPR just in case, ignore failures', function() {
           this.webPageReplay_.scheduleStop();
         }.bind(this));
-      }
-
-      if (job.isReplay && job.runNumber === 0) {
-        this.stopTrafficShaper_();  // Don't shape the recording.
-      } else if (job.runNumber === 1) {
-        if (this.isTrafficShaping_(job)) {
-          this.startTrafficShaper_(job);  // Start shaping.
-        } else if (!job.isReplay) {
-          this.stopTrafficShaper_();  // Force-stop the shaper.
-        }
       }
 
       this.app_.schedule('Start WD Server',
@@ -318,16 +488,15 @@ Agent.prototype.startJobRun_ = function(job) {
       if (!!url) {
         task.url = url;
       }
-      if (!!pac) {
-        task.pac = pac;
-      }
       var message = {
           cmd: 'run',
           runNumber: job.runNumber,
           isCacheWarm: job.isCacheWarm,
           exitWhenDone: job.isFirstViewOnly || job.isCacheWarm,
-          timeout: this.client_.jobTimeout,
+          timeout: job.timeout,
+          customBrowser: job.customBrowser,
           runTempDir: this.runTempDir_,
+          workDir: this.workDir_,
           flags: flags,
           task: task
         };
@@ -337,6 +506,23 @@ Agent.prototype.startJobRun_ = function(job) {
     logger.error('Unable to start job: ' + e.message);
     job.agentError = job.agentError || e.message;
     this.abortJob_(job);
+  }.bind(this));
+};
+
+ /**
+ * Create the requested directory if it doesn't already exist.
+ *
+ * @param {webdriver.promise.ControlFlow} app the scheduler.
+ * @param dir
+ * @return {webdriver.promise.Promise} fulfill({Object}):
+ */
+Agent.prototype.scheduleCreateDirectory_ = function(app, dir) {
+  return process_utils.scheduleFunction(app, 'Check if ' + dir + ' exists', fs.exists,
+      dir).then(function(exists) {
+    if (!exists) {
+      return process_utils.scheduleFunctionNoFault(app, 'Create Directory ' + dir,
+          fs.mkdir, dir, parseInt('0755', 8));
+    }
   }.bind(this));
 };
 
@@ -366,101 +552,53 @@ Agent.prototype.scheduleMakeDirs_ = function(dir) {
  */
 Agent.prototype.scheduleCleanRunTempDir_ = function() {
   'use strict';
-  this.scheduleMakeDirs_(this.runTempDir_);
-  process_utils.scheduleFunction(this.app_, 'Tmp read',
-      fs.readdir, this.runTempDir_).then(function(files) {
-    files.forEach(function(fileName) {
-      var filePath = path.join(this.runTempDir_, fileName);
-      process_utils.scheduleFunctionNoFault(this.app_, 'Delete ' + filePath,
-          fs.unlink, filePath);
+  this.scheduleNoFault_('Clean temp dir', function() {
+    deleteFolderRecursive(this.runTempRoot_);
+    this.scheduleMakeDirs_(this.runTempDir_);
+  }.bind(this));
+};
+
+/**
+ * Makes sure the work dir exists and is empty, but ignores deletion errors.
+ * Currently supports only flat files, no subdirectories.
+ * @private
+ */
+Agent.prototype.scheduleCleanWorkDir_ = function() {
+  'use strict';
+  this.scheduleNoFault_('Clean work dir', function() {
+    this.scheduleMakeDirs_(this.workDir_);
+    process_utils.scheduleFunctionNoFault(this.app_, 'Work read',
+        fs.readdir, this.workDir_).then(function(files) {
+      files.forEach(function(fileName) {
+        var filePath = path.join(this.workDir_, fileName);
+        try {fs.unlinkSync(filePath);} catch(e) {}
+      }.bind(this));
     }.bind(this));
   }.bind(this));
 };
 
 /**
- * @param {string} message the error message.
- * @constructor
- * @see decodeUrlAndPacFromScript_
- */
-function ScriptError(message) {
-  'use strict';
-  this.message = message;
-  this.stack = (new Error(message)).stack;
-}
-ScriptError.prototype = new Error();
-
-/**
- * Extract the URL and PAC from a simple WPT script.
- *
- * We don't support general WPT scripts.  Instead, we only support the minimal
- * subset that's required to express a PAC proxy configuration script.
- * Here are a couple examples of supported scripts:
- *
- *    1)
- *    setDnsName foo.com bar.com
- *    navigate qux.com
- *
- *    2)
- *    setDnsName foo.com ignored.com
- *    overrideHost foo.com bar.com
- *    navigate qux.com
- *
- * Blank lines and lines starting with "//" are ignored.  Lines starting with
- * "if", "endif", and "addHeader" are also ignored for now, but this feature is
- * deprecated and these commands will be rejected in a future.  Any other input
- * will throw a ScriptError.
- *
- * @param {string} script e.g.:
- *   setDnsName fromHost toHost
- *   navigate url.
- * @return {Object} a URL and PAC object, e.g.:
- *   {url:'http://x.com', pac:'function Find...'}.
+ * Download the specified file, verifying that the md5 hash matches
  * @private
  */
-Agent.prototype.decodeUrlAndPacFromScript_ = function(script) {
-  'use strict';
-  // Assign nulls to appease 'possibly uninitialized' warnings.
-  var fromHost = null, toHost = null, proxy = null, url = null;
-  script.split('\n').forEach(function(line, lineNumber) {
-    line = line.trim();
-    if (!line || 0 === line.indexOf('//')) {
-      return;
-    }
-    if (line.match(/^(if|endif|addHeader)\s/i)) {
-      return;
-    }
-    var m = line.match(/^setDnsName\s+(\S+)\s+(\S+)$/i);
-    if (m && !fromHost && !url) {
-      fromHost = m[1];
-      toHost = m[2];
-      return;
-    }
-    m = line.match(/^overrideHost\s+(\S+)\s+(\S+)$/i);
-    if (m && fromHost && m[1] === fromHost && !proxy && !url) {
-      proxy = m[2];
-      return;
-    }
-    m = line.match(/^navigate\s+(\S+)$/i);
-    if (m && fromHost && !url) {
-      url = m[1];
-      return;
-    }
-    throw new ScriptError('WPT script contains unsupported line[' +
-        lineNumber + ']: ' + line + '\n' +
-        '--- support is limited to:\n' +
-        'setDnsName H1 H2\\n [overrideHost H1 H3]\\n navigate H4');
-  });
-  if (!fromHost || !url) {
-    throw new ScriptError('WPT script lacks ' +
-        (fromHost ? 'navigate' : 'setDnsName'));
-  }
-  logger.debug('Script is a simple PAC from=%s to=%s url=%s',
-      fromHost, proxy || toHost, url);
-  return {url: url, pac: 'function FindProxyForURL(url, host) {\n' +
-      '  if ("' + fromHost + '" === host) {\n' +
-      '    return "PROXY ' + (proxy || toHost) + '";\n' +
-      '  }\n' +
-      '  return "DIRECT";\n}\n'};
+Agent.prototype.scheduleDownload_ = function() {
+  this.app_.schedule('Download', function() {
+    var tmpFile = this.cacheDir_ + '/download.tmp';
+    try {fs.unlinkSync(tmpFile);} catch(e) {}
+    this.app_.wait(function() {
+      var downloaded = new webdriver.promise.Deferred();
+      var file = fs.createWriteStream(tmpFile);
+      var request = http.get(job.customBrowserUrl, function(response) {
+        response.pipe(file);
+        file.on('finish', function() {
+          file.close(function() {
+            downloaded.fulfill();
+          });
+        });
+      });
+      return downloaded;
+    });
+  }).bind(this);
 };
 
 /**
@@ -476,6 +614,17 @@ Agent.prototype.abortJob_ = function(job) {
   this.scheduleCleanup_(job, /*isEndOfJob=*/true);
   this.scheduleNoFault_('Abort job',
       job.runFinished.bind(job, /*isRunFinished=*/true));
+};
+
+/**
+ * Updates/writes an alive file periodically
+ * @private
+ */
+Agent.prototype.onAlive_ = function() {
+  'use strict';
+  if (this.aliveFile_) {
+    fs.closeSync(fs.openSync(this.aliveFile_, 'w'));
+  }
 };
 
 /**
@@ -509,9 +658,6 @@ Agent.prototype.scheduleCleanup_ = function(job, isEndOfJob) {
           this.app_, 'Stop WPR', function() {
         this.webPageReplay_.scheduleStop();
       }.bind(this));
-    }
-    if (this.isTrafficShaping_(job)) {
-      this.stopTrafficShaper_();
     }
   }
   if (1 === parseInt(this.flags_.killall || '0', 10)) {
@@ -549,7 +695,27 @@ Agent.prototype.scheduleCleanup_ = function(job, isEndOfJob) {
       logger.error('Unable to killall pids: ' + e.message);
     });
   }
-  this.scheduleCleanRunTempDir_();
+};
+
+/**
+ * Schedules the browser MakeReady with added agent cleanup.
+ *
+ * @return {webdriver.promise.Promise} resolve(boolean) isReady.
+ * @private
+ */
+Agent.prototype.onMakeReady_ = function() {
+  'use strict';
+  try {global.gc();} catch (e) {}
+  deleteFolderRecursive(this.runTempRoot_);
+  return this.browser_.scheduleMakeReady(this.browser_).addBoth(
+      function(errOrBool) {
+    if (!(errOrBool instanceof Error)) {
+      return errOrBool;  // is online.
+    }
+    var done = new webdriver.promise.Deferred();
+    this.app_.schedule('Not ready', function() { done.reject(errOrBool); });
+    return done.promise;
+  }.bind(this));
 };
 
 /**
@@ -619,10 +785,10 @@ Agent.prototype.startTrafficShaper_ = function(job) {
   var opts = {
       down_bw: job.task.bwIn && (1000 * job.task.bwIn),
       down_delay: job.task.latency && halfDelay,
-      down_plr: job.task.plr && 0,
+      down_plr: job.task.plr && (job.task.plr / 100.0),
       up_bw: job.task.bwOut && (1000 * job.task.bwOut),
       up_delay: job.task.latency && job.task.latency - halfDelay,
-      up_plr: job.task.plr && job.task.plr  // All loss on out.
+      up_plr: job.task.plr && (job.task.plr / 100.0)
     };
   this.trafficShaper_('set', opts).addErrback(function(e) {
     var stderr = (e.stderr || e.message || '').trim();
@@ -669,14 +835,6 @@ exports.setSystemCommands = function() {
  */
 exports.main = function(flags) {
   'use strict';
-  var versionMatch = /^v(\d+)\.(\d+)(?:\.\d+)?$/.exec(process.version);
-  if (!versionMatch) {
-    throw new Error('Cannot parse NodeJS version: ' + process.version);
-  }
-  if (parseInt(versionMatch[1], 10) !== 0 ||
-      parseInt(versionMatch[2], 10) < 8) {
-    throw new Error('node version must be >=0.8, not ' + process.version);
-  }
   exports.setSystemCommands();
   delete flags.argv; // Remove nopt dup
   var app = webdriver.promise.controlFlow();

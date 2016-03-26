@@ -42,7 +42,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 static const DWORD ON_LOAD_GRACE_PERIOD = 100;
 static const DWORD SCREEN_CAPTURE_INCREMENTS = 200;
 static const DWORD DATA_COLLECTION_INTERVAL = 100;
-static const DWORD START_RENDER_MARGIN = 30;
 static const DWORD MS_IN_SEC = 1000;
 static const DWORD SCRIPT_TIMEOUT_MULTIPLIER = 10;
 static const DWORD RESPONSIVE_BROWSER_WIDTH = 480;
@@ -64,11 +63,13 @@ TestState::TestState(Results& results, ScreenCapture& screen_capture,
   ,navigated_(false)
   ,_started(false)
   ,received_data_(false) {
+  QueryPerformanceCounter(&_launch);
   QueryPerformanceFrequency(&_ms_frequency);
   _ms_frequency.QuadPart = _ms_frequency.QuadPart / 1000;
   InitializeCriticalSection(&_data_cs);
   FindBrowserNameAndVersion();
   paint_msg_ = RegisterWindowMessage(_T("WPT Browser Paint"));
+  _timeout_start_time.QuadPart = 0;
 }
 
 /*-----------------------------------------------------------------------------
@@ -89,6 +90,7 @@ void TestState::Init() {
 void TestState::Reset(bool cascade) {
   EnterCriticalSection(&_data_cs);
   _step_start.QuadPart = 0;
+  _dom_interactive = 0;
   _dom_content_loaded_event_start = 0;
   _dom_content_loaded_event_end = 0;
   _load_event_start = 0;
@@ -119,6 +121,7 @@ void TestState::Reset(bool cascade) {
     _video_capture_count = 0;
     _start.QuadPart = 0;
     _on_load.QuadPart = 0;
+    _dom_interactive = 0;
     _dom_content_loaded_event_start = 0;
     _dom_content_loaded_event_end = 0;
     _load_event_start = 0;
@@ -139,6 +142,9 @@ void TestState::Reset(bool cascade) {
     _end_cpu_time.dwHighDateTime = _end_cpu_time.dwLowDateTime = 0;
     _start_total_time.dwHighDateTime = _start_total_time.dwLowDateTime = 0;
     _end_total_time.dwHighDateTime = _end_total_time.dwLowDateTime = 0;
+    _working_set_main_proc = 0;
+    _working_set_child_procs = 0;
+    _process_count = 0;
     _progress_data.RemoveAll();
     _test_result = 0;
     _title_time.QuadPart = 0;
@@ -147,6 +153,7 @@ void TestState::Reset(bool cascade) {
     _console_log_messages.RemoveAll();
     _timed_events.RemoveAll();
     _custom_metrics.Empty();
+    _user_timing.Empty();
     navigating_ = false;
     GetSystemTime(&_start_time);
   }
@@ -172,6 +179,11 @@ void TestState::Start() {
   GetSystemTime(&_start_time);
   if (!_start.QuadPart)
     _start.QuadPart = _step_start.QuadPart;
+
+  //This is only called once, on the first navigate
+  if (!_timeout_start_time.QuadPart)
+    _timeout_start_time.QuadPart = _step_start.QuadPart;
+
   GetCPUTime(_start_cpu_time, _start_total_time);
   _active = true;
   UpdateBrowserWindow();  // the document window may not be available yet
@@ -181,6 +193,10 @@ void TestState::Start() {
   }
 
   if (!_data_timer) {
+    // for repeat view start capturing video immediately
+    if (!shared_cleared_cache)
+      received_data_ = true;
+      
     timeBeginPeriod(1);
     CreateTimerQueueTimer(&_data_timer, NULL, ::CollectData, this, 
         DATA_COLLECTION_INTERVAL, DATA_COLLECTION_INTERVAL, WT_EXECUTEDEFAULT);
@@ -208,6 +224,7 @@ void TestState::OnNavigate() {
     WptTrace(loglevel::kFunction,
              _T("[wpthook] TestState::OnNavigate()\n"));
     UpdateBrowserWindow();
+    _dom_interactive = 0;
     _dom_content_loaded_event_start = 0;
     _dom_content_loaded_event_end = 0;
     _load_event_start = 0;
@@ -255,6 +272,13 @@ void TestState::RecordTime(CString name, DWORD time, LARGE_INTEGER *out_time) {
              _T("[wpthook] - Record %s from hook: %dms (instead of %dms)\n"),
              name, elapsed_time, time);
   }
+}
+
+/*-----------------------------------------------------------------------------
+  Save web timings for DOMInteractive event.
+-----------------------------------------------------------------------------*/
+void TestState::SetDomInteractiveEvent(DWORD domInteractive) {
+  _dom_interactive = domInteractive;
 }
 
 /*-----------------------------------------------------------------------------
@@ -319,7 +343,13 @@ bool TestState::IsDone() {
   if (_active) {
     bool is_page_done = false;
     CString done_reason;
-    if (test_ms >= _test._minimum_duration) {
+    DWORD elapsed_timeout_ms = ElapsedMs(_timeout_start_time, now);
+    if (elapsed_timeout_ms > _test._test_timeout) {
+      _test_result = TEST_RESULT_TIMEOUT;
+      is_page_done = true;
+      done_reason = _T("Test timed out.");
+      _test._has_test_timed_out = true;
+    } else if (test_ms >= _test._minimum_duration) {
       DWORD load_ms = ElapsedMs(_on_load, now);
       DWORD inactive_ms = ElapsedMs(_last_activity, now);
       DWORD navigated = navigated_ ? 1:0;
@@ -348,7 +378,7 @@ bool TestState::IsDone() {
       } else if (test_ms > _test._measurement_timeout) {
         _test_result = TEST_RESULT_TIMEOUT;
         is_page_done = true;
-        done_reason = _T("Test timed out.");
+        done_reason = _T("Meaurement timed out.");
       }
     }
     if (is_page_done) {
@@ -369,7 +399,7 @@ void TestState::Done(bool force) {
   if (_active) {
     GetCPUTime(_end_cpu_time, _end_total_time);
     _screen_capture.Capture(_frame_window, CapturedImage::FULLY_LOADED);
-
+    CollectMemoryStats();
     if (force || !_test._combine_steps) {
       // kill the timer that was collecting periodic data (cpu, video, etc)
       if (_data_timer) {
@@ -671,6 +701,10 @@ DWORD TestState::ElapsedMsFromStart(LARGE_INTEGER end) const {
   return ElapsedMs(_start, end);
 }
 
+DWORD TestState::ElapsedMsFromLaunch(LARGE_INTEGER end) const {
+  return ElapsedMs(_launch, end);
+}
+
 DWORD TestState::ElapsedMs(LARGE_INTEGER start, LARGE_INTEGER end) const {
   DWORD elapsed_ms = 0;
   if (start.QuadPart && end.QuadPart > start.QuadPart) {
@@ -760,6 +794,14 @@ void TestState::AddTimedEvent(CString timed_event) {
 void TestState::SetCustomMetrics(CString custom_metrics) {
   EnterCriticalSection(&_data_cs);
   _custom_metrics = custom_metrics;
+  LeaveCriticalSection(&_data_cs);
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void TestState::SetUserTiming(CString user_timing) {
+  EnterCriticalSection(&_data_cs);
+  _user_timing = user_timing;
   LeaveCriticalSection(&_data_cs);
 }
 
@@ -891,5 +933,90 @@ void TestState::CheckResponsive() {
   if (_frame_window) {
     _screen_capture.Capture(_frame_window, CapturedImage::RESPONSIVE_CHECK,
                             false);
+  }
+}
+
+/*-----------------------------------------------------------------------------
+  Collect the memory stats for the top-level process and all child processes
+-----------------------------------------------------------------------------*/
+void TestState::CollectMemoryStats() {
+  // Build a list of all of the processes involved
+  DWORD main_proc = GetCurrentProcessId();
+  CAtlList<DWORD> procs;
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap != INVALID_HANDLE_VALUE) {
+    PROCESSENTRY32 proc;
+    proc.dwSize = sizeof(proc);
+    procs.AddHead(main_proc);
+    CAtlList<DWORD> new_procs;
+    do {
+      new_procs.RemoveAll();
+      if (Process32First(snap, &proc)) {
+        do {
+          if (procs.Find(proc.th32ProcessID) &&
+              proc.th32ParentProcessID &&
+              !procs.Find(proc.th32ParentProcessID) &&
+              StrStrI(proc.szExeFile, _T("wptdriver.exe"))) {
+            procs.AddHead(proc.th32ParentProcessID);
+          }
+          if (!procs.Find(proc.th32ProcessID) && procs.Find(proc.th32ParentProcessID))
+            new_procs.AddTail(proc.th32ProcessID);
+        } while (Process32Next(snap, &proc));
+      }
+      if (!new_procs.IsEmpty()) {
+        POSITION pos = new_procs.GetHeadPosition();
+        while (pos)
+          procs.AddTail(new_procs.GetNext(pos));
+      }
+    } while(!new_procs.IsEmpty());
+    CloseHandle(snap);
+  }
+
+  // Get the full working set for the main process
+  _working_set_main_proc = 0;
+  if (main_proc) {
+    HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, main_proc);
+    if (hProc) {
+      PROCESS_MEMORY_COUNTERS mem;
+      memset(&mem, 0, sizeof(mem));
+      mem.cb = sizeof(mem);
+      if (GetProcessMemoryInfo(hProc, &mem, sizeof(mem))) {
+        // keep track in KB which will limit us to 4TB in a DWORD
+        _working_set_main_proc = mem.WorkingSetSize / 1024;
+      }
+      CloseHandle(hProc);
+    }
+  }
+
+  // Add up the private working sets for all the child procs
+  _working_set_child_procs = 0;
+  _process_count = procs.GetCount();
+  if (!procs.IsEmpty()) {
+    // This will limit us to 4GB which is fin
+    DWORD len = sizeof(ULONG_PTR) + 1000000 * sizeof(PSAPI_WORKING_SET_BLOCK);
+    PSAPI_WORKING_SET_INFORMATION * mem = (PSAPI_WORKING_SET_INFORMATION *)malloc(len);
+    if (mem) {
+      POSITION pos = procs.GetHeadPosition();
+      while (pos) {
+        DWORD pid = procs.GetNext(pos);
+        if (pid != main_proc) {
+          HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+          if (hProc) {
+            if (QueryWorkingSet(hProc, mem, len)) {
+              DWORD count = 0;
+              for (ULONG_PTR i = 0; i < mem->NumberOfEntries; i++) {
+                if (!mem->WorkingSetInfo[i].Shared)
+                  count++;
+              }
+              // Each page is 4kb for x86/amd64
+              DWORD ws = count * 4;
+              _working_set_child_procs += ws;
+            }
+            CloseHandle(hProc);
+          }
+        }
+      }
+      free(mem);
+    }
   }
 }

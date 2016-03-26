@@ -106,7 +106,31 @@ BrowserBase.prototype.killChildProcessIfNeeded = function() {
  */
 BrowserBase.prototype.scheduleAssertIsReady = function() {
   'use strict';
-  return webdriver.promise.fulfilled();  // Assume it's ready.
+  return this.app_.schedule('Base Assert isRunning', function() {
+    return true;
+  }.bind(this));
+};
+
+/**
+ * Verifies that the browser is still running and didn't crash.
+ *
+ * @return {webdriver.promise.Promise} resolve() for addErrback.
+ * @override
+ */
+BrowserBase.prototype.scheduleAssertIsRunning = function() {
+  'use strict';
+  return webdriver.promise.fulfilled(true);  // Assume it's running.
+};
+
+/**
+ * Copy the netlog to the given file
+ *
+ * @return {webdriver.promise.Promise} resolve() for addErrback.
+ * @override
+ */
+BrowserBase.prototype.scheduleGetNetlog = function(log) {
+  'use strict';
+  return webdriver.promise.fulfilled(false);  // Assume it's running.
 };
 
 /**

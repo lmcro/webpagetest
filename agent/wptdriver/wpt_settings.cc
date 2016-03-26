@@ -42,7 +42,9 @@ WptSettings::WptSettings(WptStatus &status):
   ,_polling_delay(DEFAULT_POLLING_DELAY)
   ,_debug(0)
   ,_status(status)
-  ,_software_update(status) {
+  ,_software_update(status)
+  ,_requireValidCertificate(true)
+  ,_keep_resolution(false) {
 }
 
 /*-----------------------------------------------------------------------------
@@ -85,6 +87,16 @@ bool WptSettings::Load(void) {
     _server.Replace(_T("www.webpagetest.org"), _T("agent.webpagetest.org"));
   }
 
+  if (GetPrivateProfileString(_T("WebPagetest"), _T("username"), _T(""), buff,
+    _countof(buff), iniFile)) {
+    _username = buff;
+  }
+
+  if (GetPrivateProfileString(_T("WebPagetest"), _T("password"), _T(""), buff,
+    _countof(buff), iniFile)) {
+    _password = buff;
+  }
+
   if (GetPrivateProfileString(_T("WebPagetest"), _T("Location"), _T(""), buff, 
     _countof(buff), iniFile )) {
     _location = buff;
@@ -93,6 +105,14 @@ bool WptSettings::Load(void) {
   if (GetPrivateProfileString(_T("WebPagetest"), _T("Key"), _T(""), buff, 
     _countof(buff), iniFile )) {
     _key = buff;
+  }
+
+  _keep_resolution = GetPrivateProfileInt(_T("WebPagetest"), _T("Keep Resolution"), 0, iniFile) != 0;
+  _requireValidCertificate = GetPrivateProfileInt(_T("WebPagetest"), _T("Valid Certificate"), _requireValidCertificate, iniFile);
+
+  if (GetPrivateProfileString(_T("WebPagetest"), _T("Client Certificate Common Name"), _T(""), buff,
+    _countof(buff), iniFile)) {
+    _clientCertCommonName = buff;
   }
 
   #ifdef DEBUG
@@ -116,6 +136,8 @@ bool WptSettings::Load(void) {
   // see if we need to load settings from EC2 (server and location)
   if (GetPrivateProfileInt(_T("WebPagetest"), _T("ec2"), 0, iniFile)) {
     LoadFromEC2();
+  } else if (GetPrivateProfileInt(_T("WebPagetest"), _T("gce"), 0, iniFile)) {
+    LoadFromGCE();
   } else if (GetPrivateProfileInt(_T("WebPagetest"), _T("azure"), 0, iniFile)) {
 //    LoadFromAzure();
   }
@@ -154,6 +176,22 @@ void WptSettings::LoadFromEC2(void) {
 
   GetUrlText(_T("http://169.254.169.254/latest/meta-data/instance-id"), 
     _ec2_instance);
+  _ec2_instance = _ec2_instance.Trim();
+}
+
+/*-----------------------------------------------------------------------------
+  Load the settings from GCE Meta Data
+-----------------------------------------------------------------------------*/
+void WptSettings::LoadFromGCE(void) {
+  CString userData;
+  if (GetUrlText(
+      L"http://169.254.169.254/computeMetadata/v1/instance/attributes/wpt_data",
+      userData, L"Metadata-Flavor: Google")) {
+    ParseInstanceData(userData);
+  }
+
+  GetUrlText(_T("http://169.254.169.254/computeMetadata/v1/instance/id"), 
+    _ec2_instance, L"Metadata-Flavor: Google");
   _ec2_instance = _ec2_instance.Trim();
 }
 
@@ -206,8 +244,20 @@ void WptSettings::ParseInstanceData(CString &userData) {
         CString value = token.Mid(split + 1).Trim();
 
         if (key.GetLength() && value.GetLength()) {
-          if (!key.CompareNoCase(_T("wpt_server")))
-            _server = CString(_T("http://")) + value + _T("/");
+          if (!key.CompareNoCase(_T("wpt_server"))) {
+            if (value.Find(_T("http://")) == -1 && value.Find(_T("https://")) == -1)
+              _server = CString(_T("http://")) + value + _T("/");
+            else {
+              _server = value;
+              if (_server.Right(1) != '/')
+                _server += "/";
+            }
+          } else if (!key.CompareNoCase(_T("wpt_username")))
+            _username = value;
+          else if (!key.CompareNoCase(_T("wpt_password")))
+            _password = value;
+          else if (!key.CompareNoCase(_T("wpt_validcertificate")))
+            _requireValidCertificate = (0 == value.Compare(_T("1")));
           else if (!key.CompareNoCase(_T("wpt_loc")))
             _location = value; 
           else if (_location.IsEmpty() &&
@@ -226,7 +276,7 @@ void WptSettings::ParseInstanceData(CString &userData) {
 /*-----------------------------------------------------------------------------
   Get a string response from the given url
 -----------------------------------------------------------------------------*/
-bool WptSettings::GetUrlText(CString url, CString &response)
+bool WptSettings::GetUrlText(CString url, CString &response, LPCTSTR headers)
 {
   bool ret = false;
   response.Empty();
@@ -235,7 +285,11 @@ bool WptSettings::GetUrlText(CString url, CString &response)
                                     INTERNET_OPEN_TYPE_PRECONFIG,
                                     NULL, NULL, 0);
   if (internet) {
-    HINTERNET http_request = InternetOpenUrl(internet, url, NULL, 0, 
+    DWORD headers_len = 0;
+    if (headers)
+      headers_len = lstrlen(headers);
+    HINTERNET http_request = InternetOpenUrl(internet, url,
+                                headers, headers_len, 
                                 INTERNET_FLAG_NO_CACHE_WRITE | 
                                 INTERNET_FLAG_NO_UI | 
                                 INTERNET_FLAG_PRAGMA_NOCACHE | 
@@ -310,7 +364,7 @@ bool BrowserSettings::Load(const TCHAR * browser, const TCHAR * iniFile,
   _exe_directory.Empty();
   _options.Empty();
 
-  AtlTrace(_T("Loading settings for %s"), (LPCTSTR)browser);
+  ATLTRACE(_T("Loading settings for %s"), (LPCTSTR)browser);
 
   GetModuleFileName(NULL, buff, _countof(buff));
   *PathFindFileName(buff) = NULL;
@@ -392,7 +446,7 @@ bool BrowserSettings::Install(CString browser, CString url, CString md5) {
   _exe_directory.Empty();
   _options.Empty();
 
-  AtlTrace(_T("Checking custom browser: %s"), (LPCTSTR)browser);
+  ATLTRACE(_T("Checking custom browser: %s"), (LPCTSTR)browser);
 
   GetModuleFileName(NULL, buff, _countof(buff));
   *PathFindFileName(buff) = NULL;
@@ -501,6 +555,8 @@ void BrowserSettings::ResetProfile(bool clear_certs) {
     DeleteDirectory(recovery_dir_, false);
     DeleteDirectory(flash_dir_, false);
     DeleteDirectory(windows_dir_ + _T("\\temp"), false);
+    DeleteDirectory(app_data_dir_ + _T("\\Roaming\\Mozilla\\Firefox\\Crash Reports"), false);
+    DeleteDirectory(local_app_data_dir_ + _T("\\Microsoft\\Windows\\WER"), false);
     ClearWinInetCache();
     ClearWebCache();
   }
@@ -532,8 +588,8 @@ void BrowserSettings::ResetProfile(bool clear_certs) {
 
   // Clean up old Chrome installers that sometimes accumulate
   // (anything over 2 days old).
-  DeleteOldDirectoryEntries(
-      local_app_data_dir_ + _T("\\Google\\Update\\Install"), 172800);
+  //DeleteOldDirectoryEntries(
+  //    local_app_data_dir_ + _T("\\Google\\Update\\Install"), 172800);
 }
 
 /*-----------------------------------------------------------------------------

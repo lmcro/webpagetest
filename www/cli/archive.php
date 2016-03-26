@@ -2,7 +2,7 @@
 chdir('..');
 $MIN_DAYS = 2;
 
-include 'common.inc';
+require_once('common.inc');
 require_once('archive.inc');
 ignore_user_abort(true);
 set_time_limit(3300);   // only allow it to run for 55 minutes
@@ -43,7 +43,7 @@ $now = time();
 
 if ((isset($archive_dir) && strlen($archive_dir)) ||
     (array_key_exists('archive_s3_server', $settings) && strlen($settings['archive_s3_server']))) {
-    //CheckRelay();
+    CheckRelay();
     CheckOldDir('./results/old');
 
     // Archive the actual tests
@@ -195,10 +195,13 @@ function CheckDay($dir, $baseID, $elapsedDays) {
             // see if it is a test or a higher-level directory
             if( is_file("$dir/$test/testinfo.ini") ||
                 is_file("$dir/$test/testinfo.json.gz") ||
-                is_file("$dir/$test/testinfo.json"))
+                is_file("$dir/$test/testinfo.json") ||
+                is_dir("$dir/$test/video_1")) {
                 CheckTest("$dir/$test", "{$baseID}_$test", $elapsedDays);
-            else
+            } else {
+                // check for bogus stray test directories
                 CheckDay("$dir/$test", "{$baseID}_$test", $elapsedDays);
+            }
         }
     }
     @rmdir($dir);
@@ -221,34 +224,40 @@ function CheckTest($testPath, $id, $elapsedDays) {
   echo "\rArc:$archiveCount, Del:$deleted, Kept:$kept, Checking:" . str_pad($id,45);
 
   $delete = false;
-  $elapsed = TestLastAccessed($id);
-  if (isset($elapsed)) {
-    if( $elapsed >= $MIN_DAYS ) {
-      if (ArchiveTest($id) ) {
-        $archiveCount++;
-        $logLine .= "Archived";
-                                                                                      
-        if (VerifyArchive($id) || $elapsed >= 30)
-          $delete = true;
-      } else if ($elapsed < 60) {
-        $status = GetTestStatus($id, false);
-        if ($status['statusCode'] >= 400 ||
-            ($status['statusCode'] == 102 &&
-             $status['remote'] &&
-             $elapsed > 1)) {
-          $delete = true;
-        }
-      } elseif ($elapsedDays > 10) {
-        $logLine .= "Old test, Failed to archive, deleting";
-        $delete = true;
-      } else {
-        $logLine .= "Failed to archive";
-      }
-    } else {
-      $logLine .= "Last Accessed $elapsed days";
-    }
+  if (!is_file("$testPath/testinfo.ini") &&
+      !is_file("$testPath/testinfo.json.gz") &&
+      !is_file("$testPath/testinfo.json")) {
+      $delete = true;
   } else {
-    $delete = true;
+      $elapsed = TestLastAccessed($id);
+      if (isset($elapsed)) {
+        if( $elapsed >= $MIN_DAYS ) {
+          if (ArchiveTest($id) ) {
+            $archiveCount++;
+            $logLine .= "Archived";
+                                                                                          
+            if (VerifyArchive($id) || $elapsed >= 30)
+              $delete = true;
+          } else if ($elapsed < 60) {
+            $status = GetTestStatus($id, false);
+            if ($status['statusCode'] >= 400 ||
+                ($status['statusCode'] == 102 &&
+                 $status['remote'] &&
+                 $elapsed > 1)) {
+              $delete = true;
+            }
+          } elseif ($elapsedDays > 10) {
+            $logLine .= "Old test, Failed to archive, deleting";
+            $delete = true;
+          } else {
+            $logLine .= "Failed to archive";
+          }
+        } else {
+          $logLine .= "Last Accessed $elapsed days";
+        }
+      } else {
+        $delete = true;
+      }
   }
 
   if ($delete) {

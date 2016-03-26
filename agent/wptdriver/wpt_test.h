@@ -155,6 +155,7 @@ public:
   bool    _timeline;
   int     _timelineStackDepth;
   bool    _trace;
+  CString _traceCategories;
   bool    _netlog;
   bool    _video;
   bool    _spdy3;
@@ -176,9 +177,11 @@ public:
   CString _test_file;
   bool    _log_data;
   DWORD   _test_timeout;
+  bool    _has_test_timed_out;
   DWORD   _measurement_timeout;
   BYTE    _image_quality;
   bool    _png_screen_shot;
+  bool    _full_size_video;
   DWORD   _minimum_duration;
   bool    _save_response_bodies;
   bool    _save_html_body;
@@ -200,6 +203,10 @@ public:
   CStringA _test_error;
   CStringA _run_error;
   CString _custom_metrics;
+  DWORD   _script_timeout_multiplier;
+  CStringA _user_agent_modifier;
+  CStringA _append_user_agent;
+  DWORD    _max_test_time;
   
   // current state
   int     _run;
@@ -216,6 +223,7 @@ public:
   // Whether we need to wait for DOM element.
   bool    _dom_element_check;
   int     _no_run;  // conditional block support - if/else/endif
+  CStringA _current_event_name;
 
   // system information
   bool      has_gpu_;
@@ -232,6 +240,7 @@ protected:
   void      ParseBlockCommand(CString block_list, bool add_head);
   int       lock_count_;
   virtual bool ProcessCommand(ScriptCommand& command, bool &consumed);
+  CStringA  GetAppendUA() const;
 
   CRITICAL_SECTION cs_;
 

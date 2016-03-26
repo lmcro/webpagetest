@@ -152,6 +152,7 @@ void TestServer::MongooseCallback(enum mg_event event,
                       struct mg_connection *conn,
                       const struct mg_request_info *request_info){
 
+  hook_.LateInit();
   EnterCriticalSection(&cs);
   if (event == MG_NEW_REQUEST) {
     //OutputDebugStringA(CStringA(request_info->uri) + CStringA("?") + request_info->query_string);
@@ -166,7 +167,7 @@ void TestServer::MongooseCallback(enum mg_event event,
         test_.GetNextTask(task, record);
         if (record)
           hook_.Start();
-      }
+        }
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, task);
     } else if (strcmp(request_info->uri, "/event/load") == 0) {
       CString fixed_viewport = GetParam(request_info->query_string,
@@ -183,6 +184,7 @@ void TestServer::MongooseCallback(enum mg_event event,
       hook_.OnLoad();
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/window_timing") == 0) {
+      //OutputDebugStringA(CStringA("Window timing:") + request_info->query_string);
       DWORD start = 0;
       GetDwordParam(request_info->query_string, "domContentLoadedEventStart",
                     start);
@@ -208,6 +210,11 @@ void TestServer::MongooseCallback(enum mg_event event,
       if (first_paint < 0 || first_paint > 3600000)
         first_paint = 0;
       hook_.SetFirstPaint(first_paint);
+      DWORD dom_interactive = 0;
+      GetDwordParam(request_info->query_string, "domInteractive", dom_interactive);
+      if (dom_interactive < 0 || dom_interactive > 3600000)
+        dom_interactive = 0;
+      hook_.SetDomInteractiveEvent(dom_interactive);
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/navigate") == 0) {
       hook_.OnNavigate();
@@ -245,13 +252,14 @@ void TestServer::MongooseCallback(enum mg_event event,
         test_state_.OnStatusMessage(status);
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/request_data") == 0) {
-      if (test_state_._active) {
-        test_state_.ActivityDetected();
-        CString body = GetPostBody(conn, request_info);
-        requests_.ProcessBrowserRequest(body);
-      } else {
-        OutputDebugStringA("Request data received while not active");
-      }
+      CString body = GetPostBody(conn, request_info);
+      //OutputDebugStringA("\n\n*****\n\n");
+      //OutputDebugString(body);
+      requests_.ProcessBrowserRequest(body);
+      SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
+    } else if (strcmp(request_info->uri, "/event/user_timing") == 0) {
+      CString body = GetPostBody(conn, request_info);
+      test_state_.SetUserTiming(body);
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/console_log") == 0) {
       if (test_state_._active) {
@@ -260,13 +268,18 @@ void TestServer::MongooseCallback(enum mg_event event,
       }
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/timed_event") == 0) {
-      test_state_.AddTimedEvent(GetPostBody(conn, request_info));
+      CString body = GetPostBody(conn, request_info);
+      //OutputDebugStringW("Timed event: " + body);
+      test_state_.AddTimedEvent(body);
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/custom_metrics") == 0) {
-      test_state_.SetCustomMetrics(GetPostBody(conn, request_info));
+      CString body = GetPostBody(conn, request_info);
+      //OutputDebugStringW("Custom Metrics: " + body);
+      test_state_.SetCustomMetrics(body);
       SendResponse(conn, request_info, RESPONSE_OK, RESPONSE_OK_STR, "");
     } else if (strcmp(request_info->uri, "/event/stats") == 0) {
       DWORD dom_count = 0;
+      //OutputDebugStringA(CStringA("DOM Count:") + request_info->query_string);
       if (GetDwordParam(request_info->query_string, "domCount", dom_count) &&
           dom_count)
         test_state_._dom_element_count = dom_count;
@@ -456,6 +469,30 @@ CString TestServer::GetPostBody(struct mg_connection *conn,
           if (bytes && bytes <= length) {
             buff[bytes] = 0;
             body += CA2T(buff, CP_UTF8);
+            length -= bytes;
+          }
+        }
+        free(buff);
+      }
+    }
+  }
+
+  return body;
+}
+CStringA TestServer::GetPostBodyA(struct mg_connection *conn,
+                                  const struct mg_request_info *request_info){
+  CStringA body;
+  const char * length_string = mg_get_header(conn, "Content-Length");
+  if (length_string) {
+    int length = atoi(length_string);
+    if (length) {
+      char * buff = (char *)malloc(length + 1);
+      if (buff) {
+        while (length) {
+          int bytes = mg_read(conn, buff, length);
+          if (bytes && bytes <= length) {
+            buff[bytes] = 0;
+            body += CStringA(buff);
             length -= bytes;
           }
         }

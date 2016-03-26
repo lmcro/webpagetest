@@ -19,7 +19,7 @@ if (isset($_REQUEST['php']))
 if (isset($_REQUEST['pretty']))
   $options['pretty'] = $_REQUEST['pretty'];
 if (isset($_REQUEST['run']))
-  $options['run'] = $_REQUEST['run'];
+  $options['run'] = intval($_REQUEST['run']);
   
 $filename = '';
 if (@strlen($url)) {
@@ -29,6 +29,7 @@ if (@strlen($url)) {
 if (!strlen($filename))
     $filename = "pagetest";
 $filename .= ".$id.har";
+header("Content-disposition: attachment; filename=$filename");
 header('Content-type: application/json');
 
 // see if we need to wrap it in a JSONP callback

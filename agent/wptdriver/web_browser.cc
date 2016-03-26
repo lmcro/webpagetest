@@ -45,6 +45,8 @@ static const TCHAR * CHROME_SOFTWARE_RENDER =
     _T(" --disable-accelerated-compositing");
 static const TCHAR * CHROME_USER_AGENT =
     _T(" --user-agent=");
+static const TCHAR * CHROME_DISABLE_PLUGINS = 
+    _T(" --disable-plugins-discovery --disable-bundled-ppapi-flash");
 static const TCHAR * CHROME_REQUIRED_OPTIONS[] = {
     _T("--enable-experimental-extension-apis"),
     _T("--disable-background-networking"),
@@ -53,13 +55,22 @@ static const TCHAR * CHROME_REQUIRED_OPTIONS[] = {
     _T("--process-per-tab"),
     _T("--new-window"),
     _T("--disable-translate"),
+    _T("--disable-notifications"),
     _T("--disable-desktop-notifications"),
     _T("--allow-running-insecure-content"),
-    _T("--disable-save-password-bubble")
+    _T("--disable-component-update"),
+    _T("--disable-background-downloads"),
+    _T("--disable-add-to-shelf"),
+    _T("--disable-client-side-phishing-detection"),
+    _T("--disable-datasaver-prompt"),
+    _T("--disable-default-apps"),
+    _T("--disable-domain-reliability"),
+    _T("--safebrowsing-disable-auto-update"),
+    _T("--host-rules=\"MAP cache.pack.google.com 127.0.0.1\"")
 };
 static const TCHAR * CHROME_IGNORE_CERT_ERRORS =
     _T(" --ignore-certificate-errors");
- 
+
 static const TCHAR * FIREFOX_REQUIRED_OPTIONS[] = {
     _T("-no-remote")
 };
@@ -118,6 +129,7 @@ bool WebBrowser::RunAndWait() {
       CString exe(_browser._exe);
       exe.MakeLower();
       if (exe.Find(_T("chrome.exe")) >= 0) {
+        ConfigureChromePreferences();
         if (_test._browser_command_line.GetLength()) {
           lstrcat(cmdLine, CString(_T(" ")) +
                   _test._browser_command_line);
@@ -139,6 +151,8 @@ bool WebBrowser::RunAndWait() {
             lstrcat(cmdLine, CHROME_SPDY3);
           if (_test._force_software_render)
             lstrcat(cmdLine, CHROME_SOFTWARE_RENDER);
+          if (_test._emulate_mobile)
+            lstrcat(cmdLine, CHROME_DISABLE_PLUGINS);
           if (_test._user_agent.GetLength() &&
               _test._user_agent.Find(_T('"')) == -1) {
             lstrcat(cmdLine, CHROME_USER_AGENT);
@@ -176,6 +190,10 @@ bool WebBrowser::RunAndWait() {
       } else {
         lstrcat(cmdLine, _T(" http://127.0.0.1:8888/blank.html"));
       }
+
+      // set up the TLS session key log
+      SetEnvironmentVariable(L"SSLKEYLOGFILE", _test._file_base + L"_keylog.log");
+      DeleteFile(_test._file_base + L"_keylog.log");
 
       _status.Set(_T("Launching: %s\n"), cmdLine);
 
@@ -230,9 +248,9 @@ bool WebBrowser::RunAndWait() {
         // wait for the browser to finish (infinite timeout if we are debugging)
         if (_browser_process && ok) {
           ret = true;
+          DWORD wait_time = _test._max_test_time ? _test._max_test_time : _test._test_timeout + 180000;  // Allow extra time for results processing
           _status.Set(_T("Waiting up to %d seconds for the test to complete"), 
-                      (_test._test_timeout / SECONDS_TO_MS) * 2);
-          DWORD wait_time = _test._test_timeout * 2;
+                      (wait_time / SECONDS_TO_MS));
           #ifdef DEBUG
           wait_time = INFINITE;
           #endif
@@ -341,7 +359,7 @@ bool WebBrowser::ConfigureIpfw(WptTestDriver& test) {
     buff.Format(_T("[wptdriver] - Throttling: %d Kbps in, %d Kbps out, ")
                 _T("%d ms latency, %0.2f plr"), test._bwIn, test._bwOut, 
                 test._latency, test._plr );
-    AtlTrace(buff);
+    ATLTRACE(buff);
 
     if (_ipfw.SetPipe(PIPE_IN, test._bwIn, latency,test._plr/100.0)) {
       // make up for odd values
@@ -358,7 +376,7 @@ bool WebBrowser::ConfigureIpfw(WptTestDriver& test) {
     ret = true;
 
   if (!ret) {
-    AtlTrace(_T("[wptdriver] - Error Configuring dummynet"));
+    ATLTRACE(_T("[wptdriver] - Error Configuring dummynet"));
   }
 
   return ret;
@@ -689,4 +707,36 @@ void WebBrowser::ConfigureIESettings() {
                     (const LPBYTE)&val, sizeof(val));
       RegCloseKey(hKey);
     }
+}
+
+/*-----------------------------------------------------------------------------
+  Write to both the profile prefs file and the master_preferences file
+  that is used as a template
+-----------------------------------------------------------------------------*/
+void WebBrowser::ConfigureChromePreferences() {
+  CString prefs_file =
+      _browser._profile_directory + _T("\\Default\\Preferences");
+  TCHAR master_prefs_file[10240];
+  lstrcpy(master_prefs_file, _browser._exe);
+  lstrcpy(PathFindFileName(master_prefs_file), _T("master_preferences"));
+
+  LPCSTR prefs =
+    "{"
+      "\"profile\":{"
+        "\"password_manager_enabled\":false"
+      "}"
+    "}";
+  SHCreateDirectoryEx(NULL, _browser._profile_directory + _T("\\Default"), NULL);
+  HANDLE file = CreateFile(prefs_file, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);
+  if (file != INVALID_HANDLE_VALUE) {
+    DWORD written = 0;
+    WriteFile(file, prefs, strlen(prefs), &written, 0);
+    CloseHandle(file);
+  }
+  file = CreateFile(master_prefs_file, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);
+  if (file != INVALID_HANDLE_VALUE) {
+    DWORD written = 0;
+    WriteFile(file, prefs, strlen(prefs), &written, 0);
+    CloseHandle(file);
+  }
 }

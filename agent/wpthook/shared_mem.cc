@@ -133,3 +133,4 @@ void WINAPI SetBrowserExe(const WCHAR * exe) {
 DWORD WINAPI GetBrowserProcessId() {
   return shared_browser_process_id;
 }
+

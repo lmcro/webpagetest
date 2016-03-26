@@ -7,7 +7,7 @@ require_once('waterfall.inc');
 $options = null;
 if (array_key_exists('end', $_REQUEST))
     $options = array('end' => $_REQUEST['end']);
-$data = loadPageRunData($testPath, $run, $cached, $options);
+$data = loadPageRunData($testPath, $run, $cached, $options, $test['testinfo']);
 
 $page_keywords = array('Performance Test','Details','Webpagetest','Website Speed Test','Page Speed');
 $page_description = "Website performance test details$testLabel";
@@ -255,7 +255,17 @@ $page_description = "Website performance test details$testLabel";
                 $userTimings = array();
                 foreach($data as $metric => $value)
                   if (substr($metric, 0, 9) == 'userTime.')
-                    $userTimings[substr($metric, 9)] = $value;
+                    $userTimings[substr($metric, 9)] = number_format($value / 1000, 3) . 's';
+                if (isset($data['custom']) && count($data['custom'])) {
+                  foreach($data['custom'] as $metric) {
+                    if (isset($data[$metric])) {
+                      $value = $data[$metric];
+                      if (is_double($value))
+                        $value = number_format($value, 3, '.', '');
+                      $userTimings[$metric] = $value;
+                    }
+                  }
+                }
                 $timingCount = count($userTimings);
                 $navTiming = false;
                 if ((array_key_exists('loadEventStart', $data) && $data['loadEventStart'] > 0) ||
@@ -275,16 +285,20 @@ $page_description = "Website performance test details$testLabel";
                       echo "<th$borderClass>";
                       if ($data['firstPaint'] > 0)
                         echo "RUM First Paint</th><th>";
+                      if (isset($data['domInteractive']) && $data['domInteractive'] > 0)
+                        echo "<a href=\"http://dvcs.w3.org/hg/webperf/raw-file/tip/specs/NavigationTiming/Overview.html#process\">domInteractive</a></th><th>";
                       echo "<a href=\"http://dvcs.w3.org/hg/webperf/raw-file/tip/specs/NavigationTiming/Overview.html#process\">domContentLoaded</a></th><th><a href=\"http://dvcs.w3.org/hg/webperf/raw-file/tip/specs/NavigationTiming/Overview.html#process\">loadEvent</a></th>";
                     }
                     echo '</tr><tr>';
                     if ($timingCount)
                       foreach($userTimings as $label => $value)
-                        echo '<td>' . number_format($value / 1000, 3) . 's</td>';
+                        echo '<td>' . htmlspecialchars($value) . '</td>';
                     if ($navTiming) {
                       echo "<td$borderClass>";
                       if ($data['firstPaint'] > 0)
                         echo number_format($data['firstPaint'] / 1000.0, 3) . 's</td><td>';
+                      if (isset($data['domInteractive']) && $data['domInteractive'] > 0)
+                        echo number_format($data['domInteractive'] / 1000.0, 3) . 's</td><td>';
                       echo number_format($data['domContentLoadedEventStart'] / 1000.0, 3) . 's - ' .
                               number_format($data['domContentLoadedEventEnd'] / 1000.0, 3) . 's (' .
                               number_format(($data['domContentLoadedEventEnd'] - $data['domContentLoadedEventStart']) / 1000.0, 3) . 's)' . '</td>';
@@ -328,6 +342,8 @@ $page_description = "Website performance test details$testLabel";
                           echo '<td><table><tr><td><div class="bar" style="width:2px; background-color:#F28300"></div></td><td>DOM Element</td></tr></table></td>';
                         if(array_key_exists('firstPaint', $data) && (float)$data['firstPaint'] > 0.0 )
                           echo '<td><table><tr><td><div class="bar" style="width:2px; background-color:#8FBC83"></div></td><td>msFirstPaint</td></tr></table></td>';
+                        if(array_key_exists('domInteractive', $data) && (float)$data['domInteractive'] > 0.0 )
+                          echo '<td><table><tr><td><div class="bar" style="width:2px; background-color:#FFC61A"></div></td><td>DOM Interactive</td></tr></table></td>';
                         if(array_key_exists('domContentLoadedEventStart', $data) && (float)$data['domContentLoadedEventStart'] > 0.0 )
                           echo '<td><table><tr><td><div class="bar" style="width:15px; background-color:#D888DF"></div></td><td>DOM Content Loaded</td></tr></table></td>';
                         if(array_key_exists('loadEventStart', $data) && (float)$data['loadEventStart'] > 0.0 )

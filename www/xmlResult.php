@@ -88,6 +88,8 @@ else
                 echo "<latency>{$test['testinfo']['latency']}</latency>\n";
                 echo "<plr>{$test['testinfo']['plr']}</plr>\n";
             }
+            if( isset($test['testinfo']['mobile']) )
+                echo "<mobile>" . xml_entities($test['testinfo']['mobile']) .   "</mobile>\n";
             if( @strlen($test['testinfo']['label']) )
                 echo "<label>" . xml_entities($test['testinfo']['label']) . "</label>\n";
             if( @strlen($test['testinfo']['completed']) )
@@ -490,6 +492,8 @@ function xmlDomains($id, $testPath, $run, $cached) {
             echo "<requests>{$values['requests']}</requests>\n";
             echo "<bytes>{$values['bytes']}</bytes>\n";
             echo "<connections>{$values['connections']}</connections>\n";
+            if (isset($values['cdn_provider']))
+              echo "<cdn_provider>{$values['cdn_provider']}</cdn_provider>\n";
             echo "</domain>\n";
         }
         echo "</domains>\n";
@@ -595,6 +599,9 @@ function StatusMessages($id, $testPath, $run, $cached) {
 * @param mixed $cached
 */
 function ConsoleLog($id, $testPath, $run, $cached) {
+    if(isset($_GET['console']) && $_GET['console'] == 0) {
+        return;
+    }
     $consoleLog = DevToolsGetConsoleLog($testPath, $run, $cached);
     if (isset($consoleLog) && is_array($consoleLog) && count($consoleLog)) {
         echo "<consoleLog>\n";

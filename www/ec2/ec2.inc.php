@@ -2,6 +2,17 @@
 require_once('./common_lib.inc');
 require_once('./lib/aws/aws-autoloader.php');
 
+if(extension_loaded('newrelic')) {
+    newrelic_add_custom_tracer('EC2_StartInstanceIfNeeded');
+    newrelic_add_custom_tracer('EC2_StartInstance');
+    newrelic_add_custom_tracer('EC2_TerminateIdleInstances');
+    newrelic_add_custom_tracer('EC2_GetRunningInstances');
+    newrelic_add_custom_tracer('EC2_SendInstancesOffline');
+    newrelic_add_custom_tracer('EC2_StartNeededInstances');
+    newrelic_add_custom_tracer('EC2_TerminateInstance');
+    newrelic_add_custom_tracer('EC2_LaunchInstance');
+}
+
 
 /**
 * Tests are pending for the given location, start instances as necessary
@@ -357,6 +368,7 @@ function EC2_StartNeededInstances() {
 }
 
 function EC2_DeleteOrphanedVolumes() {
+/*
   $key = GetSetting('ec2_key');
   $secret = GetSetting('ec2_secret');
   if ($key && $secret && GetSetting('ec2_prune_volumes')) {
@@ -384,6 +396,7 @@ function EC2_DeleteOrphanedVolumes() {
       EC2LogError("Pruning EC2 volumes: $error");
     }
   }
+*/
 }
 
 function EC2_GetRunningInstances() {
@@ -588,7 +601,7 @@ function EC2_GetAMILocations() {
 function EC2Log($msg) {
   $dir = __DIR__ . '/log';
   if (!is_dir($dir))
-    mkdir($dir, 0744, true);
+    mkdir($dir, 0777, true);
   if (is_dir($dir)) {
     // Delete any error logs that are more than a week old
     $files = glob("$dir/ec2.log.*");

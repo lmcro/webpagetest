@@ -41,6 +41,92 @@ var TIMELINE_AGGREGATION_INTERVAL = 500;
 var TIMELINE_START_TIMEOUT = 10000;
 var TRACING_START_TIMEOUT = 10000;
 
+var NAV_TIMING_SCRIPT = "\
+(function(){\
+  var timing = {};\
+  function addTime(name) {\
+    try {\
+      if (window.performance.timing[name] > 0) {\
+        timing[name] = Math.max(0, (\
+          window.performance.timing[name] -\
+          window.performance.timing['navigationStart']));\
+      }\
+    } catch(e){}\
+  };\
+  addTime('domInteractive');\
+  addTime('domContentLoadedEventStart');\
+  addTime('domContentLoadedEventEnd');\
+  addTime('loadEventStart');\
+  addTime('loadEventEnd');\
+  try {\
+    timing['msFirstPaint'] = 0;\
+    if (window['chrome'] !== undefined &&\
+        window.chrome['loadTimes'] !== undefined) {\
+      var chromeTimes = window.chrome.loadTimes();\
+      if (chromeTimes['firstPaintTime'] !== undefined &&\
+          chromeTimes['firstPaintTime'] > 0) {\
+        var startTime = chromeTimes['requestTime'] ? chromeTimes['requestTime'] : chromeTimes['startLoadTime'];\
+        if (chromeTimes['firstPaintTime'] >= startTime)\
+          timing['msFirstPaint'] = (chromeTimes['firstPaintTime'] - startTime) * 1000.0;\
+      }\
+    }\
+  } catch(e) {}\
+  return timing;\
+})();";
+
+var USER_TIMING_SCRIPT = '\
+(function(){\
+  var m = [];\
+  try {\
+    if (window["performance"] != undefined &&\
+        (window.performance.getEntriesByType ||\
+         window.performance.webkitGetEntriesByType)) {\
+      if (window.performance.getEntriesByType) {\
+        var marks = window.performance.getEntriesByType("mark");\
+        var measures = window.performance.getEntriesByType("measure");\
+      } else {\
+        var marks = window.performance.webkitGetEntriesByType("mark");\
+        var measures = window.performance.webkitGetEntriesByType("measure");\
+      }\
+      if (marks.length) {\
+        for (var i = 0; i < marks.length; i++)\
+          m.push({"entryType": marks[i].entryType, "name": marks[i].name, "startTime": marks[i].startTime});\
+      }\
+      if (measures.length) {\
+        for (var i = 0; i < measures.length; i++)\
+          m.push({"entryType": measures[i].entryType, "name": measures[i].name, "startTime": measures[i].startTime, "duration": measures[i].duration});\
+      }\
+    }\
+  } catch(e) {}\
+  return m;\
+})();';
+
+var DOM_COUNT_SCRIPT = "\
+(function(){\
+  var domCount = 0;\
+  try {\
+    var domCount = document.documentElement.getElementsByTagName('*').length;\
+    if (domCount === undefined)\
+      domCount = 0;\
+  } catch(e) {}\
+  return domCount;\
+})();";
+
+var CUSTOM_METRICS_SCRIPT = '\
+(function(metrics){\
+  var results = {};\
+  for (var i = 0; i < metrics.length; i++) {\
+    try {\
+      var fn = new Function("return function wptCustomMetric" + i + "(){" + metrics[i].code + "};")();\
+      var result = fn();\
+      if (typeof result == "undefined")\
+        result = "";\
+      results[metrics[i].name] = result;\
+    } catch(e){}\
+  }\
+  return results;\
+})';
+
 /**
  * Construct an object that connectes to the Chrome debugger.
  *
@@ -58,11 +144,16 @@ wpt.chromeDebugger.Init = function(tabId, chromeApi, callback) {
     g_instance.tabId_ = tabId;
     g_instance.chromeApi_ = chromeApi;
     g_instance.startedCallback = callback;
-    g_instance.timelineStartedCallback = undefined;
     g_instance.devToolsData = '';
     g_instance.trace = false;
+    g_instance.traceCategories = "*";
+    g_instance.timeline = false;
     g_instance.statsDoneCallback = undefined;
     g_instance.mobileEmulation = undefined;
+    g_instance.customMetrics = undefined;
+    g_instance.timelineStackDepth = 0;
+    g_instance.traceRunning = false;
+    g_instance.userTiming = [];
     var version = '1.0';
     if (g_instance.chromeApi_['debugger'])
         g_instance.chromeApi_.debugger.attach({tabId: g_instance.tabId_}, version, wpt.chromeDebugger.OnAttachDebugger);
@@ -76,12 +167,12 @@ wpt.chromeDebugger.SetActive = function(active) {
   if (active) {
     g_instance.requests = {};
     g_instance.idMap = {};
+    g_instance.userTiming = [];
     g_instance.receivedData = false;
     g_instance.devToolsData = '';
     g_instance.statsDoneCallback = undefined;
-    if (g_instance.trace) {
-      g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Tracing.start');
-    }
+    g_instance.customMetrics = undefined;
+    wpt.chromeDebugger.StartTrace();
   }
 };
 
@@ -90,8 +181,15 @@ wpt.chromeDebugger.SetActive = function(active) {
  */
 wpt.chromeDebugger.Exec = function(code, callback) {
   g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Runtime.evaluate', {expression: code, returnByValue: true}, function(response){
-    callback(response);
+    var value = undefined;
+    if (response['result'] !== undefined && response.result['value'] !== undefined)
+      value = response.result.value;
+    callback(value);
   });
+};
+
+wpt.chromeDebugger.SetUserAgent = function(UAString) {
+  g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Network.setUserAgentOverride', {"userAgent": UAString});
 };
 
 /**
@@ -99,35 +197,59 @@ wpt.chromeDebugger.Exec = function(code, callback) {
  */
 wpt.chromeDebugger.CaptureTimeline = function(timelineStackDepth, callback) {
   g_instance.timeline = true;
-  g_instance.timelineStartedCallback = callback;
-  g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Timeline.start', {maxCallStackDepth: timelineStackDepth}, function(){
-    setTimeout(function(){
-      if (g_instance.timelineStartedCallback) {
-        g_instance.timelineStartedCallback();
-        g_instance.timelineStartedCallback = undefined;
-      }
-    }, TIMELINE_START_TIMEOUT);
-  });
+  g_instance.timelineStackDepth = timelineStackDepth;
+  if (g_instance.active) {
+    wpt.chromeDebugger.StartTrace();
+  }
 };
 
 /**
  * Capture a trace
  */
-wpt.chromeDebugger.CaptureTrace = function() {
+wpt.chromeDebugger.CaptureTrace = function(categories) {
   g_instance.trace = true;
+  if (categories != undefined && categories.length)
+    g_instance.traceCategories = "-*," + categories;
   if (g_instance.active) {
-    g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Tracing.start');
+    wpt.chromeDebugger.StartTrace();
   }
 };
 
-wpt.chromeDebugger.CollectStats = function(callback) {
-  g_instance.statsDoneCallback = callback;
-  wpt.chromeDebugger.SendDevToolsData(function(){
-    if (g_instance.trace) {
-      g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Tracing.end');
-    } else {
-      g_instance.statsDoneCallback();
-    }
+wpt.chromeDebugger.StartTrace = function() {
+  if (!g_instance.traceRunning) {
+    g_instance.traceRunning = true;
+    var traceCategories = '';
+    if (g_instance.trace)
+      traceCategories = g_instance.traceCategories;
+    else
+      traceCategories = '-*';
+    if (g_instance.timeline)
+      traceCategories = traceCategories + ',toplevel,blink.console,disabled-by-default-devtools.timeline,devtools.timeline,disabled-by-default-devtools.timeline.frame,devtools.timeline.frame';
+    if (g_instance.timelineStackDepth > 0)
+      traceCategories += ',disabled-by-default-devtools.timeline.stack,devtools.timeline.stack';
+    var params = {categories: traceCategories, options:'record-as-much-as-possible'};
+    g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Tracing.start', params);
+  }
+}
+
+wpt.chromeDebugger.CollectStats = function(customMetrics, callback) {
+    g_instance.statsDoneCallback = callback;
+    g_instance.customMetrics = customMetrics;
+  wpt.chromeDebugger.collectDOMCount(function(){
+    wpt.chromeDebugger.collectNavigationTiming(function(){
+      wpt.chromeDebugger.collectUserTiming(function(){
+        wpt.chromeDebugger.collectCustomMetrics(function(){
+          wpt.chromeDebugger.SendDevToolsData(function(){
+            if (g_instance.traceRunning) {
+            g_instance.traceRunning = false;
+            g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Tracing.end');
+          } else {
+            g_instance.statsDoneCallback();
+          }
+          });
+        });
+      });
+    });
   });
 };
 
@@ -142,21 +264,32 @@ wpt.chromeDebugger.EmulateMobile = function(deviceString) {
 wpt.chromeDebugger.OnMessage = function(tabId, message, params) {
   // timeline and tracing starts seem to have a delay in startup
   // and don't really start when the callback completes
-  if (g_instance.timelineStartedCallback &&
-      message === 'Timeline.eventRecorded') {
-    g_instance.timelineStartedCallback();
-    g_instance.timelineStartedCallback = undefined;
-  }
   var tracing = false;
   if (message === 'Tracing.dataCollected') {
     tracing = true;
-    if (params['value'] !== undefined)
-      wpt.chromeDebugger.sendEvent('trace', JSON.stringify(params['value']));
+    if (params['value'] !== undefined) {
+      // Collect the netlog events separately for calculating the request timings
+      var len = params['value'].length;
+      for(var i = 0; i < len; i++) {
+        if (params['value'][i]['cat'] == 'blink.user_timing')
+          g_instance.userTiming.push(params['value'][i]);
+      }
+      if (g_instance.trace || g_instance.timeline)
+        wpt.chromeDebugger.sendEvent('trace', JSON.stringify(params['value']));
+    }
   }
   if (message === 'Tracing.tracingComplete') {
     tracing = true;
+    if (g_instance.userTiming.length) {
+      wpt.chromeDebugger.sendEvent('user_timing', JSON.stringify(g_instance.userTiming));
+      g_instance.userTiming = [];
+    }
     if (g_instance.statsDoneCallback)
       g_instance.statsDoneCallback();
+  }
+
+  if(message === 'Console.messageAdded') {
+    wpt.chromeDebugger.sendEvent('console_log', JSON.stringify(params['message']));
   }
 
     // actual message recording
@@ -315,27 +448,6 @@ wpt.chromeDebugger.SendDevToolsData = function(callback) {
 };
 
 /**
- * Attached using the 1.0 released interface
- */
-wpt.chromeDebugger.OnAttachDebugger = function() {
-  wpt.LOG.info('attached to debugger extension interface');
-  g_instance.connected = true;
-  g_instance.requests = {};
-
-  // attach the event listener
-  g_instance.chromeApi_.debugger.onEvent.addListener(wpt.chromeDebugger.OnMessage);
-
-  // start the different interfaces we are interested in monitoring
-  g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Network.enable', null, function(){
-    g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Console.enable', null, function(){
-      g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Page.enable', null, function(){
-        g_instance.startedCallback();
-      });
-    });
-  });
-};
-
-/**
 * Fix up all of the request details for sending
 */
 wpt.chromeDebugger.FinalizeRequest = function(id) {
@@ -394,8 +506,8 @@ wpt.chromeDebugger.FinalizeRequest = function(id) {
   // Fix-up the bytes in (fall back to content length) if we didn't get it explicitly
   if (g_instance.requests[id]['bytesIn'] === undefined && g_instance.requests[id]['bytesInEncoded'] !== undefined)
     g_instance.requests[id].bytesIn = g_instance.requests[id].bytesInEncoded;
+  var headerlength = 0;
   if (!g_instance.requests[id]['bytesIn'] && g_instance.requests[id]['response'] !== undefined && g_instance.requests[id].response['headers'] !== undefined) {
-    var headerlength = 0;
     if (g_instance.requests[id].response['headersText'] !== undefined) {
       headerlength = g_instance.requests[id].response['headersText'].length;
     } else {
@@ -411,6 +523,14 @@ wpt.chromeDebugger.FinalizeRequest = function(id) {
       g_instance.requests[id]['bytesIn'] = parseInt(g_instance.requests[id].response.headers['Content-Length']) + headerlength;
     else if (g_instance.requests[id].response.headers['content-length'] !== undefined)
       g_instance.requests[id]['bytesIn'] = parseInt(g_instance.requests[id].response.headers['content-length']) + headerlength;
+  }
+  // Populate the objectSize (fall back to bytesIn if not available)
+  g_instance.requests[id]['objectSize'] = g_instance.requests[id]['bytesIn'] - headerlength;
+  if (g_instance.requests[id]['response'] !== undefined && g_instance.requests[id].response['headers'] !== undefined) {
+    if (g_instance.requests[id].response.headers['Content-Length'] !== undefined)
+      g_instance.requests[id]['objectSize'] = parseInt(g_instance.requests[id].response.headers['Content-Length']);
+    else if (g_instance.requests[id].response.headers['content-length'] !== undefined)
+      g_instance.requests[id]['objectSize'] = parseInt(g_instance.requests[id].response.headers['content-length']);
   }
 }
 
@@ -434,6 +554,8 @@ wpt.chromeDebugger.sendRequestDetails = function(id) {
       eventData += 'errorCode=' + request.errorCode + '\n';
     if (request['error'] !== undefined)
       eventData += 'errorText=' + request.error + '\n';
+    if (request['initialPriority'] !== undefined)
+      eventData += 'priority=' + request.initialPriority + '\n';
 
     if (request['startTime'] !== undefined)
       eventData += 'startTime=' + request.startTime + '\n';
@@ -458,6 +580,8 @@ wpt.chromeDebugger.sendRequestDetails = function(id) {
 
     if (request['bytesIn'] !== undefined)
       eventData += 'bytesIn=' + request.bytesIn + '\n';
+    if (request['objectSize'] !== undefined)
+      eventData += 'objectSize=' + request.objectSize + '\n';
     if (request['initiator'] !== undefined && request.initiator['type'] !== undefined) {
       eventData += 'initiatorType=' + request.initiator.type + '\n';
       if (request.initiator.type == 'parser') {
@@ -549,7 +673,7 @@ wpt.chromeDebugger.sendRequestDetails = function(id) {
             request.response.headers['status'] !== undefined) {
           eventData += request.response.headers['version'] + ' ' + request.response.headers['status'] + '\n';
         } else if (request.response.headers['status'] !== undefined) {
-          eventData += 'HTTP/2.0 ' + request.response.headers['status'] + '\n';
+          eventData += 'HTTP/2 ' + request.response.headers['status'] + '\n';
         }
         for (tag in request.response.headers) {
           if (tag !== 'version' && tag !== 'status')
@@ -582,6 +706,24 @@ wpt.chromeDebugger.sendRequestDetails = function(id) {
   }
 };
 
+wpt.chromeDebugger.OnAttachDebugger = function() {
+  wpt.LOG.info('attached to debugger extension interface');
+  g_instance.connected = true;
+  g_instance.requests = {};
+
+  // attach the event listener
+  g_instance.chromeApi_.debugger.onEvent.addListener(wpt.chromeDebugger.OnMessage);
+
+  // start the different interfaces we are interested in monitoring
+  g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Network.enable', null, function(){
+    g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Console.enable', null, function(){
+      g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Page.enable', null, function(){
+        g_instance.startedCallback();
+      });
+    });
+  });
+};
+
 /**
 * Notify the c++ code that we got our first byte of data for the page.
 */
@@ -589,6 +731,65 @@ wpt.chromeDebugger.SendReceivedData = function() {
   if (!g_instance.receivedData) {
     g_instance.receivedData = true;
     wpt.chromeDebugger.sendEvent('received_data', '');
+  }
+};
+
+wpt.chromeDebugger.collectDOMCount = function(callback) {
+  wpt.chromeDebugger.Exec(DOM_COUNT_SCRIPT, function(result) {
+    wpt.chromeDebugger.sendEvent('stats?domCount=' + result);
+    callback();
+  });
+};
+
+wpt.chromeDebugger.collectNavigationTiming = function(callback) {
+  wpt.chromeDebugger.Exec(NAV_TIMING_SCRIPT, function(result) {
+    wpt.chromeDebugger.sendEvent(
+        'window_timing?domContentLoadedEventStart=' +
+            result['domContentLoadedEventStart'] +
+        '&domContentLoadedEventEnd=' +
+            result['domContentLoadedEventEnd'] +
+        '&domInteractive=' + result['domInteractive'] +
+        '&loadEventStart=' + result['loadEventStart'] +
+        '&loadEventEnd=' + result['loadEventEnd'] +
+        '&msFirstPaint=' + result['msFirstPaint']);
+    callback();
+  });
+};
+
+wpt.chromeDebugger.collectUserTiming = function(callback) {
+  wpt.chromeDebugger.Exec(USER_TIMING_SCRIPT, function(result) {
+    if (result !== undefined && result.length) {
+      for (var i = 0; i < result.length; i++) {
+        var mark = result[i];
+        mark.type = result['entryType'];
+        wpt.chromeDebugger.sendEvent('timed_event', JSON.stringify(mark));
+      }
+    }
+    callback();
+  });
+};
+
+wpt.chromeDebugger.collectCustomMetrics = function(callback) {
+  var metrics = [];
+  if (g_instance['customMetrics'] !== undefined && g_instance.customMetrics.length) {
+    var lines = g_instance.customMetrics.split("\n");
+    var lineCount = lines.length;
+    for (var i = 0; i < lineCount; i++) {
+      var parts = lines[i].split(":");
+      if (parts.length == 2) {
+        metrics.push({"name": parts[0], "code": window.atob(parts[1])});
+      }
+    }
+  }
+
+  if (metrics.length) {
+    var code = CUSTOM_METRICS_SCRIPT + '(' + JSON.stringify(metrics) + ');'
+    wpt.chromeDebugger.Exec(code, function(result) {
+      wpt.chromeDebugger.sendEvent('custom_metrics', JSON.stringify(result));
+      callback();
+    });
+  } else {
+    callback();
   }
 };
 

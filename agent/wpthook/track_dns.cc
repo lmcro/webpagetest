@@ -29,7 +29,16 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "StdAfx.h"
 #include "track_dns.h"
 #include "test_state.h"
+#include "wpthook.h"
 #include "../wptdriver/wpt_test.h"
+
+static LPCTSTR blocked_domains[] = {
+  _T(".pack.google.com"),     // Chrome crx update URL
+  _T(".gvt1.com"),            // Chrome crx update URL
+  _T("clients1.google.com"),  // Autofill update downloads
+  _T("shavar.services.mozilla.com"), // Firefox tracking protection updates
+  NULL
+};
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
@@ -45,6 +54,20 @@ TrackDns::TrackDns(TestState& test_state, WptTest& test):
 TrackDns::~TrackDns(void){
   Reset();
   DeleteCriticalSection(&cs);
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+bool TrackDns::BlockLookup(CString name) {
+  bool block = false;
+  LPCTSTR * domain = blocked_domains;
+  name.MakeLower();
+  while (*domain && !block) {
+    if (name.Find(*domain) != -1)
+      block = true;
+    domain++;
+  }
+  return block;
 }
 
 /*-----------------------------------------------------------------------------

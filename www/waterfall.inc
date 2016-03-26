@@ -103,6 +103,7 @@ function GetPageEvents($page_data) {
                             $page_data['loadEventEnd']),
         'nav_dom' => array($page_data['domContentLoadedEventStart'],
                            $page_data['domContentLoadedEventEnd']),
+        'nav_dom_interactive' => $page_data['domInteractive'],
         'load' => $page_data['docTime']
         );
 }
@@ -228,7 +229,7 @@ function _GetMapOrImage($rows, $url, $page_events, $options, $is_image_map, &$pa
 
     // Figure out the scale.
     $max_ms = 0;
-    if ((int)@$_REQUEST['max'] > 0) {
+    if (@$_REQUEST['max'] > 0) {
         $max_ms = (int)($_REQUEST['max'] * 1000.0);
     } else {
         // Include all page events and resource times in time scale.
@@ -326,22 +327,50 @@ function _GetMapOrImage($rows, $url, $page_events, $options, $is_image_map, &$pa
           $cpu_slice_colors = array();
           $mime_colors = MimeColors();
           
-          $cpu_slice_colors['ParseHTML'] = GetColor($im, 130, 168, 222);
+          $cpu_slice_colors['ParseHTML'] = GetColor($im, 112, 162, 227);
           $cpu_slice_colors['ResourceReceivedData'] = $cpu_slice_colors['ParseHTML'];
+          $cpu_slice_colors['ResourceSendRequest'] = $cpu_slice_colors['ParseHTML'];
+          $cpu_slice_colors['ResourceReceivedResponse'] = $cpu_slice_colors['ParseHTML'];
+          $cpu_slice_colors['ResourceReceiveResponse'] = $cpu_slice_colors['ParseHTML'];
+          $cpu_slice_colors['ResourceFinish'] = $cpu_slice_colors['ParseHTML'];
+          $cpu_slice_colors['CommitLoad'] = $cpu_slice_colors['ParseHTML'];
 
-          $cpu_slice_colors['Layout'] = GetColor($im, 171, 213, 149);
+          $cpu_slice_colors['Layout'] = GetColor($im, 154, 126, 230);
           $cpu_slice_colors['RecalculateStyles'] = $cpu_slice_colors['Layout'];
+          $cpu_slice_colors['ParseAuthorStyleSheet'] = $cpu_slice_colors['Layout'];
+          $cpu_slice_colors['ScheduleStyleRecalculation'] = $cpu_slice_colors['Layout'];
+          $cpu_slice_colors['InvalidateLayout'] = $cpu_slice_colors['Layout'];
+          $cpu_slice_colors['UpdateLayoutTree'] = $cpu_slice_colors['Layout'];
 
-          $cpu_slice_colors['Paint'] = GetColor($im, 194, 219, 181);
+          $cpu_slice_colors['Paint'] = GetColor($im, 113, 179, 99);
+          $cpu_slice_colors['PaintImage'] = $cpu_slice_colors['Paint'];
+          $cpu_slice_colors['PaintSetup'] = $cpu_slice_colors['Paint'];
           $cpu_slice_colors['CompositeLayers'] = $cpu_slice_colors['Paint'];
           $cpu_slice_colors['DecodeImage'] = $cpu_slice_colors['Paint'];
+          $cpu_slice_colors['Decode Image'] = $cpu_slice_colors['Paint'];
+          $cpu_slice_colors['ImageDecodeTask'] = $cpu_slice_colors['Paint'];
           $cpu_slice_colors['Rasterize'] = $cpu_slice_colors['Paint'];
+          $cpu_slice_colors['GPUTask'] = $cpu_slice_colors['Paint'];
+          $cpu_slice_colors['SetLayerTreeId'] = $cpu_slice_colors['Paint'];
+          $cpu_slice_colors['layerId'] = $cpu_slice_colors['Paint'];
+          $cpu_slice_colors['UpdateLayer'] = $cpu_slice_colors['Paint'];
+          $cpu_slice_colors['UpdateLayerTree'] = $cpu_slice_colors['Paint'];
+          $cpu_slice_colors['Draw LazyPixelRef'] = $cpu_slice_colors['Paint'];
+          $cpu_slice_colors['Decode LazyPixelRef'] = $cpu_slice_colors['Paint'];
 
-          $cpu_slice_colors['EvaluateScript'] = GetColor($im, 228, 185, 136);
+          $cpu_slice_colors['EvaluateScript'] = GetColor($im, 241, 196, 83);
           $cpu_slice_colors['EventDispatch'] = $cpu_slice_colors['EvaluateScript'];
           $cpu_slice_colors['FunctionCall'] = $cpu_slice_colors['EvaluateScript'];
           $cpu_slice_colors['GCEvent'] = $cpu_slice_colors['EvaluateScript'];
+          $cpu_slice_colors['TimerInstall'] = $cpu_slice_colors['EvaluateScript'];
           $cpu_slice_colors['TimerFire'] = $cpu_slice_colors['EvaluateScript'];
+          $cpu_slice_colors['TimerRemove'] = $cpu_slice_colors['EvaluateScript'];
+          $cpu_slice_colors['XHRLoad'] = $cpu_slice_colors['EvaluateScript'];
+          $cpu_slice_colors['XHRReadyStateChange'] = $cpu_slice_colors['EvaluateScript'];
+          $cpu_slice_colors['v8.compile'] = $cpu_slice_colors['EvaluateScript'];
+          $cpu_slice_colors['MinorGC'] = $cpu_slice_colors['EvaluateScript'];
+          $cpu_slice_colors['MajorGC'] = $cpu_slice_colors['EvaluateScript'];
+          $cpu_slice_colors['FireAnimationFrame'] = $cpu_slice_colors['EvaluateScript'];
 
           $cpu_slice_colors['other'] = GetColor($im, 184, 184, 184);
           $cpu_slice_colors['Program'] = $cpu_slice_colors['other'];
@@ -439,6 +468,7 @@ function _GetMapOrImage($rows, $url, $page_events, $options, $is_image_map, &$pa
                 'nav_load' => GetColor($im, 192, 192, 255),
                 'nav_dom' => GetColor($im, 216, 136, 223),
                 'nav_first_paint' => GetColor($im, 143, 188, 131),
+                'nav_dom_interactive' => GetColor($im, 255, 198, 26),
                 'aft' => GetColor($im, 255, 0, 0),
                 'user' => GetColor($im, 105, 0, 158)
                 );
@@ -549,9 +579,9 @@ function _GetMapOrImage($rows, $url, $page_events, $options, $is_image_map, &$pa
                         // draw the line for this data point in the order the colors are defined
                         $y = $cpu_bottom;
                         foreach ($cpu_slice_colors as $type => $color) {
-                          if (array_key_exists($type, $cpu_times)) {
+                          if (isset($cpu_times[$type])) {
                             $pixels = $cpu_height * $cpu_times[$type];
-                            $y2 = max($cpu_bottom - $pixels, $cpu_top);
+                            $y2 = max($y - $pixels, $cpu_top);
                             imageline($im, $x, $y, $x, $y2, $color);
                             $y = $y2;
                           }
@@ -776,9 +806,10 @@ function AverageCpuSlices($ms_start, $bins, &$slices, &$known_types) {
         foreach ($slices[$ms] as $type => $value) {
           if ($value > 0) {
             $valid = true;
-            if (!array_key_exists($type, $known_types))
+            if (!isset($known_types[$type])) {
               $type = 'other';
-            if (!array_key_exists($type, $totals))
+            }
+            if (!isset($totals[$type]))
               $totals[$type] = 0;
             $totals[$type] += $value;
           }

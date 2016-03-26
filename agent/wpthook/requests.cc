@@ -34,9 +34,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "track_sockets.h"
 #include "../wptdriver/wpt_test.h"
 
-
-const char * HTTP_METHODS[] = {"GET ", "HEAD ", "POST ", "PUT ", "OPTIONS ",
-                               "DELETE ", "TRACE ", "CONNECT ", "PATCH "};
+// Base ID for connection ID's from the browser
+static const DWORD BROWSER_CONNECTION_BASE = 1000000;
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
@@ -45,11 +44,12 @@ Requests::Requests(TestState& test_state, TrackSockets& sockets,
   _test_state(test_state)
   , _sockets(sockets)
   , _dns(dns)
-  , _test(test) {
+  , _test(test)
+  , _nextRequestId(1) {
   _active_requests.InitHashTable(257);
   connections_.InitHashTable(257);
   InitializeCriticalSection(&cs);
-  _start_browser_clock = 0;
+  _browser_launch_time = 0;
 }
 
 /*-----------------------------------------------------------------------------
@@ -71,7 +71,6 @@ void Requests::Reset() {
   LeaveCriticalSection(&cs);
   _dns.ClaimAll();
   _sockets.ClaimAll();
-  _start_browser_clock = 0;
 }
 
 /*-----------------------------------------------------------------------------
@@ -89,13 +88,7 @@ void Requests::Unlock() {
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void Requests::SocketClosed(DWORD socket_id) {
-  EnterCriticalSection(&cs);
-  Request * request = NULL;
-  if (_active_requests.Lookup(socket_id, request) && request) {
-    request->SocketClosed();
-    _active_requests.RemoveKey(socket_id);
-  }
-  LeaveCriticalSection(&cs);
+  StreamClosed(socket_id, 0);
 }
 
 /*-----------------------------------------------------------------------------
@@ -105,7 +98,10 @@ void Requests::DataIn(DWORD socket_id, DataChunk& chunk) {
     EnterCriticalSection(&cs);
     // See if socket maps to a known request.
     Request * request = NULL;
-    if (_active_requests.Lookup(socket_id, request) && request) {
+    ULARGE_INTEGER key;
+    key.HighPart = socket_id;
+    key.LowPart = 0;
+    if (_active_requests.Lookup(key.QuadPart, request) && request) {
       _test_state.ActivityDetected();
       request->DataIn(chunk);
       WptTrace(loglevel::kFunction, 
@@ -128,7 +124,7 @@ bool Requests::ModifyDataOut(DWORD socket_id, DataChunk& chunk) {
   bool is_modified = false;
   if (_test_state._active) {
     EnterCriticalSection(&cs);
-    Request * request = GetOrCreateRequest(socket_id, chunk);
+    Request * request = GetOrCreateRequest(socket_id, 0, chunk);
     if (request) {
       _test_state.ActivityDetected();
       is_modified = request->ModifyDataOut(chunk);
@@ -148,7 +144,7 @@ bool Requests::ModifyDataOut(DWORD socket_id, DataChunk& chunk) {
 void Requests::DataOut(DWORD socket_id, DataChunk& chunk) {
   if (_test_state._active) {
     EnterCriticalSection(&cs);
-    Request * request = GetOrCreateRequest(socket_id, chunk);
+    Request * request = GetOrCreateRequest(socket_id, 0, chunk);
     if (request) {
       _test_state.ActivityDetected();
       request->DataOut(chunk);
@@ -168,8 +164,8 @@ void Requests::DataOut(DWORD socket_id, DataChunk& chunk) {
 /*-----------------------------------------------------------------------------
   A request is "active" once it is created by calling DataOut/DataIn.
 -----------------------------------------------------------------------------*/
-bool Requests::HasActiveRequest(DWORD socket_id) {
-  return GetActiveRequest(socket_id) != NULL;
+bool Requests::HasActiveRequest(DWORD socket_id, DWORD stream_id) {
+  return GetActiveRequest(socket_id, stream_id) != NULL;
 }
 
 /*-----------------------------------------------------------------------------
@@ -178,6 +174,8 @@ bool Requests::HasActiveRequest(DWORD socket_id) {
 -----------------------------------------------------------------------------*/
 bool Requests::IsHttpRequest(const DataChunk& chunk) const {
   bool ret = false;
+  const char * HTTP_METHODS[] = {"GET ", "HEAD ", "POST ", "PUT ",
+      "OPTIONS ", "DELETE ", "TRACE ", "CONNECT ", "PATCH "};
   for (int i = 0; i < _countof(HTTP_METHODS) && !ret; i++) {
     const char * method = HTTP_METHODS[i];
     unsigned long method_len = strlen(method);
@@ -205,20 +203,23 @@ bool Requests::IsSpdyRequest(const DataChunk& chunk) const {
  /*-----------------------------------------------------------------------------
    Find an existing request, or create a new one if appropriate.
  -----------------------------------------------------------------------------*/
-Request * Requests::GetOrCreateRequest(DWORD socket_id,
+Request * Requests::GetOrCreateRequest(DWORD socket_id, DWORD stream_id,
                                        const DataChunk& chunk) {
   Request * request = NULL;
-  if (_active_requests.Lookup(socket_id, request) && request) {
+  ULARGE_INTEGER key;
+  key.HighPart = socket_id;
+  key.LowPart = stream_id;
+  if (_active_requests.Lookup(key.QuadPart, request) && request) {
     // We have an existing request on this socket, however, if data has been
     // received already, then this may be a new request.
     if (!request->_is_spdy && request->_response_data.GetDataSize() &&
         IsHttpRequest(chunk)) {
-      request = NewRequest(socket_id, false);
+      request = NewRequest(socket_id, stream_id, false);
     }
   } else {
     bool is_spdy = IsSpdyRequest(chunk);
     if (is_spdy || IsHttpRequest(chunk)) {
-      request = NewRequest(socket_id, is_spdy);
+      request = NewRequest(socket_id, stream_id, is_spdy);
     }
   }
   return request;
@@ -226,11 +227,17 @@ Request * Requests::GetOrCreateRequest(DWORD socket_id,
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
-Request * Requests::NewRequest(DWORD socket_id, bool is_spdy) {
-  Request * request = new Request(_test_state, socket_id, _sockets, _dns,
-                                  _test, is_spdy, *this);
+Request * Requests::NewRequest(DWORD socket_id, DWORD stream_id,
+                               bool is_spdy) {
   EnterCriticalSection(&cs);
-  _active_requests.SetAt(socket_id, request);
+  Request * request = new Request(_test_state, socket_id, stream_id,
+                                  _nextRequestId, _sockets, _dns, _test,
+                                  is_spdy, *this);
+  _nextRequestId++;
+  ULARGE_INTEGER key;
+  key.HighPart = socket_id;
+  key.LowPart = stream_id;
+  _active_requests.SetAt(key.QuadPart, request);
   _requests.AddTail(request);
   LeaveCriticalSection(&cs);
   return request;
@@ -239,9 +246,12 @@ Request * Requests::NewRequest(DWORD socket_id, bool is_spdy) {
 /*-----------------------------------------------------------------------------
   A request is "active" once it is created by calling DataOut/DataIn.
 -----------------------------------------------------------------------------*/
-Request * Requests::GetActiveRequest(DWORD socket_id) {
+Request * Requests::GetActiveRequest(DWORD socket_id, DWORD stream_id) {
   Request * request = NULL;
-  _active_requests.Lookup(socket_id, request);
+  ULARGE_INTEGER key;
+  key.HighPart = socket_id;
+  key.LowPart = stream_id;
+  _active_requests.Lookup(key.QuadPart, request);
   return request;
 }
 
@@ -260,12 +270,15 @@ LONGLONG Requests::GetRelativeTime(Request * request, double end_time, double ti
   information
 -----------------------------------------------------------------------------*/
 void Requests::ProcessBrowserRequest(CString request_data) {
-  CString browser, url, initiator, initiator_line, initiator_column;
+  CString browser, url, initiator, initiator_line, initiator_column, priority;
   CStringA request_headers, response_headers;
   double  start_time = 0, end_time = 0, first_byte = 0, request_start = 0,
           dns_start = -1, dns_end = -1, connect_start = -1, connect_end = -1,
           ssl_start = -1, ssl_end = -1;
-  long connection = 0, error_code = 0, status = 0, bytes_in = 0;
+  long connection = 0, error_code = 0, status = 0, bytes_in = 0, stream_id = 0,
+       object_size = 0, local_port = 0;
+  ULONG ip = 0;
+  bool push = false;
   LARGE_INTEGER now;
   QueryPerformanceCounter(&now);
   bool processing_values = true;
@@ -306,6 +319,10 @@ void Requests::ProcessBrowserRequest(CString request_data) {
               end_time = _ttof(value);
             else if (!key.CompareNoCase(_T("bytesIn")))
               bytes_in = _ttol(value);
+            else if (!key.CompareNoCase(_T("objectSize")))
+              object_size = _ttol(value);
+            else if (!key.CompareNoCase(_T("priority")))
+              priority = value;
             else if (!key.CompareNoCase(_T("initiatorUrl")))
               initiator = value;
             else if (!key.CompareNoCase(_T("initiatorLineNumber")))
@@ -315,7 +332,9 @@ void Requests::ProcessBrowserRequest(CString request_data) {
             else if (!key.CompareNoCase(_T("status")))
               status = _ttol(value);
             else if (!key.CompareNoCase(_T("connectionId")))
-              connection = _ttol(value);
+              connection = BROWSER_CONNECTION_BASE + _ttol(value);
+            else if (!key.CompareNoCase(_T("streamId")))
+              stream_id = _ttol(value);
             else if (!key.CompareNoCase(_T("dnsStart")))
               dns_start = _ttof(value);
             else if (!key.CompareNoCase(_T("dnsEnd")))
@@ -328,6 +347,12 @@ void Requests::ProcessBrowserRequest(CString request_data) {
               ssl_start = _ttof(value);
             else if (!key.CompareNoCase(_T("sslEnd")))
               ssl_end = _ttof(value);
+            else if (!key.CompareNoCase(_T("push")) && !value.CompareNoCase(_T("true")))
+              push = true;
+            else if (!key.CompareNoCase(_T("clientPort")))
+              local_port = _ttol(value);
+            else if (!key.CompareNoCase(_T("ip")))
+              ip = inet_addr((LPCSTR)CT2A(value));
           }
         }
       } else if (processing_request) {
@@ -338,29 +363,40 @@ void Requests::ProcessBrowserRequest(CString request_data) {
     }
     line = request_data.Tokenize(_T("\n"), position);
   }
-  if (url.GetLength() && initiator.GetLength()) {
+  if (push && !initiator.GetLength()) {
+    initiator = _T("HTTP/2 Server Push");
+  }
+  if (url.GetLength() && (initiator.GetLength() || priority.GetLength())) {
     BrowserRequestData data(url);
     data.initiator_ = initiator;
     data.initiator_line_ = initiator_line;
     data.initiator_column_ = initiator_column;
+    data.priority_ = priority;
     EnterCriticalSection(&cs);
     browser_request_data_.AddTail(data);
     LeaveCriticalSection(&cs);
   }
-  _test_state.ActivityDetected();
   if (end_time > 0 && request_start > 0) {
-    Request * request = new Request(_test_state, connection, _sockets, _dns,
-                                    _test, false, *this);
+    Request * request = new Request(_test_state, connection, stream_id,
+                                    _nextRequestId, _sockets, _dns, _test,
+                                    false, *this);
+    _nextRequestId++;
     request->_from_browser = true;
+    request->priority_ = priority;
     request->initiator_ = initiator;
     request->initiator_line_ = initiator_line;
     request->initiator_column_ = initiator_column;
     request->_bytes_in = bytes_in;
+    request->_object_size = object_size;
+    if (local_port)
+      request->_local_port = local_port;
+    if (ip)
+      request->_peer_address = ip;
 
     // See if we can map the browser's internal clock timestamps to our
     // performance counters.  If we have a DNS lookup we can match up or a
     // likely socket connect then we should be able to.
-    if (_start_browser_clock == 0) {
+    if (_browser_launch_time == 0) {
       if (dns_end != -1) {
         // get the host name
         URL_COMPONENTS parts;
@@ -377,8 +413,8 @@ void Requests::ProcessBrowserRequest(CString request_data) {
           if (_dns.Find(host, addresses, match_dns_start, match_dns_end)) {
             // Figure out what the clock time would have been at our perf
             // counter start time.
-            _start_browser_clock =
-                dns_end - _test_state.ElapsedMsFromStart(match_dns_end);
+            _browser_launch_time =
+                dns_end - _test_state.ElapsedMsFromLaunch(match_dns_end);
           }
         }
       }
@@ -396,12 +432,12 @@ void Requests::ProcessBrowserRequest(CString request_data) {
 
     // figure out the conversion from browser time to perf counter
     LONGLONG ms_freq = _test_state._ms_frequency.QuadPart;
-    if (_start_browser_clock != 0) {
-      request->_end.QuadPart = _test_state._start.QuadPart +
-          (LONGLONG)((end_time - _start_browser_clock)  * ms_freq);
+    if (_browser_launch_time != 0) {
+      request->_end.QuadPart = _test_state._launch.QuadPart +
+          (LONGLONG)((end_time - _browser_launch_time)  * ms_freq);
     } else {
       request->_end.QuadPart = now.QuadPart;
-      _start_browser_clock = end_time - _test_state.ElapsedMsFromStart(request->_end);
+      _browser_launch_time = end_time - _test_state.ElapsedMsFromLaunch(request->_end);
     }
     request->_start.QuadPart = request->_end.QuadPart - 
                 (LONGLONG)((end_time - request_start) * ms_freq);
@@ -441,7 +477,8 @@ void Requests::ProcessBrowserRequest(CString request_data) {
     LARGE_INTEGER earliest, latest;
     earliest.QuadPart = _test_state._start.QuadPart - slop;
     latest.QuadPart = now.QuadPart + slop;
-    if (request->_start.QuadPart > earliest.QuadPart &&
+    if (_test_state._active &&
+        request->_start.QuadPart > earliest.QuadPart &&
         request->_end.QuadPart < latest.QuadPart &&
         (!request->_first_byte.QuadPart ||
          (request->_first_byte.QuadPart > earliest.QuadPart &&
@@ -495,4 +532,89 @@ bool Requests::GetBrowserRequest(BrowserRequestData &data, bool remove) {
   LeaveCriticalSection(&cs);
 
   return found;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void Requests::StreamClosed(DWORD socket_id, DWORD stream_id) {
+  EnterCriticalSection(&cs);
+  Request * request = NULL;
+  ULARGE_INTEGER key;
+  key.HighPart = socket_id;
+  key.LowPart = stream_id;
+  if (_active_requests.Lookup(key.QuadPart, request) && request) {
+    request->SocketClosed();
+    _active_requests.RemoveKey(key.QuadPart);
+  }
+  LeaveCriticalSection(&cs);
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void Requests::HeaderIn(DWORD socket_id, DWORD stream_id,
+                        const char * header, const char * value, bool pushed) {
+  EnterCriticalSection(&cs);
+  Request * request = GetActiveRequest(socket_id, stream_id);
+  if (!request)
+    request = NewRequest(socket_id, stream_id, false);
+  if (request)
+    request->HeaderIn(header, value, pushed);
+  LeaveCriticalSection(&cs);
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void Requests::ObjectDataIn(DWORD socket_id, DWORD stream_id,
+                            DataChunk& chunk) {
+  EnterCriticalSection(&cs);
+  Request * request = GetActiveRequest(socket_id, stream_id);
+  if (request)
+    request->ObjectDataIn(chunk);
+  LeaveCriticalSection(&cs);
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void Requests::BytesIn(DWORD socket_id, DWORD stream_id, size_t len) {
+  EnterCriticalSection(&cs);
+  Request * request = GetActiveRequest(socket_id, stream_id);
+  if (request)
+    request->BytesIn(len);
+  LeaveCriticalSection(&cs);
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void Requests::BytesOut(DWORD socket_id, DWORD stream_id, size_t len) {
+  EnterCriticalSection(&cs);
+  Request * request = GetActiveRequest(socket_id, stream_id);
+  if (request)
+    request->BytesOut(len);
+  LeaveCriticalSection(&cs);
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void Requests::HeaderOut(DWORD socket_id, DWORD stream_id, const char * header,
+                         const char * value, bool pushed) {
+  EnterCriticalSection(&cs);
+  Request * request = GetActiveRequest(socket_id, stream_id);
+  if (!request)
+    request = NewRequest(socket_id, stream_id, false);
+  if (request)
+    request->HeaderOut(header, value, pushed);
+  LeaveCriticalSection(&cs);
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void Requests::ObjectDataOut(DWORD socket_id, DWORD stream_id,
+                             DataChunk& chunk) {
+  EnterCriticalSection(&cs);
+  Request * request = GetActiveRequest(socket_id, stream_id);
+  if (!request)
+    request = NewRequest(socket_id, stream_id, false);
+  if (request)
+    request->ObjectDataOut(chunk);
+  LeaveCriticalSection(&cs);
 }

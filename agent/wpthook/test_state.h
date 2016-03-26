@@ -91,6 +91,7 @@ public:
   void OnNavigate();
   void OnNavigateComplete();
   void OnAllDOMElementsLoaded(DWORD load_time);
+  void SetDomInteractiveEvent(DWORD domInteractive);
   void SetDomContentLoadedEvent(DWORD start, DWORD end);
   void SetLoadEvent(DWORD load_event_start, DWORD load_event_end);
   void SetFirstPaint(DWORD first_paint);
@@ -104,10 +105,12 @@ public:
   void TitleSet(CString title);
   void UpdateBrowserWindow();
   DWORD ElapsedMsFromStart(LARGE_INTEGER end) const;
+  DWORD ElapsedMsFromLaunch(LARGE_INTEGER end) const;
   void FindBrowserNameAndVersion();
   void AddConsoleLogMessage(CString message);
   void AddTimedEvent(CString timed_event);
   void SetCustomMetrics(CString custom_metrics);
+  void SetUserTiming(CString user_timing);
   CString GetConsoleLogJSON();
   CString GetTimedEventsJSON();
   void GetElapsedCPUTimes(double &doc, double &end,
@@ -118,10 +121,12 @@ public:
   void CheckResponsive();
 
   // times
+  LARGE_INTEGER _launch;
   LARGE_INTEGER _start;
   LARGE_INTEGER _step_start;
   LARGE_INTEGER _first_navigate;
   LARGE_INTEGER _dom_elements_time;
+  DWORD _dom_interactive;
   DWORD _dom_content_loaded_event_start;
   DWORD _dom_content_loaded_event_end;
   LARGE_INTEGER _on_load;
@@ -134,6 +139,9 @@ public:
   LARGE_INTEGER _ms_frequency;
   LARGE_INTEGER _title_time;
   SYSTEMTIME    _start_time;
+
+  //Timeout measurer
+  LARGE_INTEGER _timeout_start_time;
 
   LARGE_INTEGER _first_byte;
   int _doc_requests;
@@ -153,6 +161,9 @@ public:
   int _dom_element_count;
   int _is_responsive;
   int _viewport_specified;
+  DWORD _working_set_main_proc;
+  DWORD _working_set_child_procs;
+  DWORD _process_count;
 
   bool  _active;
   int   _current_document;
@@ -171,6 +182,7 @@ public:
   CAtlList<ProgressData>   _progress_data;     // CPU, memory and Bandwidth
   CAtlList<StatusMessage>  _status_messages;   // Browser status
   CString                  _custom_metrics;    // JSON-formatted custom metrics data
+  CString                  _user_timing;       // JSON-formatted user timing data (from Chrome traces)
 
 private:
   bool  _started;
@@ -211,4 +223,5 @@ private:
   DWORD ElapsedMs(LARGE_INTEGER start, LARGE_INTEGER end) const;
   void GetCPUTime(FILETIME &cpu_time, FILETIME &total_time);
   double GetElapsedMilliseconds(FILETIME &start, FILETIME &end);
+  void CollectMemoryStats();
 };
