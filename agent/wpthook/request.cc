@@ -208,7 +208,8 @@ void RequestData::ProcessRequestLine() {
       if (pos > -1) {
         _object = line.Tokenize(" ", pos).Trim();
         // For proxy cases where the GET is a full URL, parse it into it's pieces
-        if (_object.Find(":") > -1) {
+        if (!_object.Left(5).CompareNoCase("http:") ||
+            !_object.Left(6).CompareNoCase("https:")) {
           CString scheme, host, object;
           unsigned short port = 0;
           if (ParseUrl((LPCTSTR)CA2T(_object), scheme, host, port, object)) {
@@ -382,6 +383,7 @@ Request::Request(TestState& test_state, DWORD socket_id, DWORD stream_id,
   , _stream_id(stream_id)
   , _request_id(request_id)
   , _is_spdy(is_spdy)
+  , _was_pushed(false)
   , _ms_start(0)
   , _ms_first_byte(0)
   , _ms_end(0)
@@ -503,8 +505,8 @@ void Request::HeaderIn(const char * header, const char * value, bool pushed) {
     if (!_first_byte.QuadPart)
       _first_byte.QuadPart = _end.QuadPart;
     _response_data.AddHeader(header, value);
-    if (pushed && initiator_.IsEmpty())
-      initiator_ = "HTTP/2 Server Push";
+    if (pushed)
+      _was_pushed = true;
   }
   LeaveCriticalSection(&cs);
 }
@@ -548,8 +550,8 @@ void Request::HeaderOut(const char * header, const char * value, bool pushed) {
   }
   if (_is_active) {
     _request_data.AddHeader(header, value);
-    if (pushed && initiator_.IsEmpty())
-      initiator_ = "HTTP/2 Server Push";
+    if (pushed)
+      _was_pushed = true;
   }
   LeaveCriticalSection(&cs);
 }
@@ -668,13 +670,11 @@ bool Request::Process() {
     url += CA2T(_request_data.GetObject(), CP_UTF8);
     if (!_from_browser) {
       BrowserRequestData data(url);
-      if (requests_.GetBrowserRequest(data)) {
-        initiator_ = data.initiator_;
-        initiator_line_ = data.initiator_line_;
-        initiator_column_ = data.initiator_column_;
+      if (requests_.GetBrowserRequest(data))
         priority_ = data.priority_;
-      }
     }
+    // see if we have matching initiator data
+    requests_._initiators.Lookup(url, initiator_);
 
     rtt_ = _sockets.GetRTT(_peer_address);
   }
