@@ -50,7 +50,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <atltime.h>
 #include <atlcoll.h>
 #include <in6addr.h>
-#include "../wpthook/wpthook_dll.h"
 
 // shared internal includes
 #include "wpt_status.h"
@@ -59,5 +58,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "webpagetest.h"
 #include "web_browser.h"
 #include "TraceRoute.h"
-#include "WinPCap.h"
 #include "util.h"
+#include "../wpthook/shared_mem.h"
+extern SharedMem * g_shared;

@@ -123,6 +123,7 @@ function Job(client, task) {
   this.testError = undefined;
   this.retryError = undefined;
   this.timeout = (task.timeout * 1000) || client.jobTimeout;
+  this.task.headers = undefined;
   this.processScript(task['script']);
 }
 /** Public class. */
@@ -144,6 +145,17 @@ function constructHostsFile(task) {
   var hosts = "127.0.0.1 localhost";
   try {
     var block = task['block'];
+    if (block !== undefined) {
+      var entries = block.split(" ");
+      var count = entries.length;
+      for (var i = 0; i < count; i++) {
+        var host = entries[i].trim();
+        if (host.length) {
+          hosts += " " + host;
+        }
+      }
+    }
+    block = task['blockdomains'];
     if (block !== undefined) {
       var entries = block.split(" ");
       var count = entries.length;
@@ -204,6 +216,19 @@ Job.prototype.processScriptCommand = function(command, value, extra) {
       } else {
         logger.debug("Invalid setDns command parameters");
       }
+    } else if (command == 'addheader' || command == 'setheader') {
+      if (value !== undefined) {
+        var index = value.indexOf(":");
+        if (index > 0) {
+          var n = value.substr(0, index).trim();
+          var v = value.substr(index + 1).trim();
+          if (n.length && v.length) {
+            if (this.task.headers == undefined)
+              this.task.headers = {}
+            this.task.headers[n] = v;
+          }
+        }
+      }
     } else if (command == 'setdns') {
       if (value !== undefined &&
           extra !== undefined) {
@@ -225,7 +250,7 @@ Job.prototype.processScriptCommand = function(command, value, extra) {
       } else {
         logger.debug("Invalid setDnsName command parameters");
       }
-    } else if (command == 'block') {
+    } else if (command == 'block' || command == 'blockdomains') {
       if (value !== undefined) {
         hosts = "";
         var entries = value.split(" ");
@@ -300,7 +325,7 @@ ResultFile.ResultType = Object.freeze({
   IMAGE: 'image',
   IMAGE_ANNOTATIONS: 'image_annotations',
   PCAP: 'pcap',
-  TRACE: 'trace'
+  GZIP: 'gzip'
 });
 
 
@@ -363,6 +388,7 @@ function Client(app, args) {
   if (-1 === serverUrl.indexOf('://')) {
     serverUrl = 'http://' + serverUrl;
   }
+  serverUrl = serverUrl.replace('www.webpagetest.org', 'agent.webpagetest.org');
   this.baseUrl_ = url.parse(serverUrl || '');
   // Bring the URL path into a normalized form ending with /
   // The trailing / is for url.resolve not to strip the last path component
@@ -516,7 +542,7 @@ Client.prototype.requestNextJob_ = function() {
             ('&pc=' + encodeURIComponent(this.name_)) : (this.deviceSerial_ ?
             ('&pc=' + encodeURIComponent(this.deviceSerial_)) : '')) +
           (this.apiKey_ ? ('&key=' + encodeURIComponent(this.apiKey_)) : '') +
-          '&f=json');
+          '&f=json&apk=1');
 
       logger.info('Get work: %s', getWorkUrl);
       var options = url.parse(getWorkUrl);
@@ -823,7 +849,7 @@ Client.prototype.postResultFile_ = function(job, resultFile, fields, callback) {
     if (resultFile) {
       if (exports.ResultFile.ResultType.IMAGE === resultFile.resultType ||
           exports.ResultFile.ResultType.PCAP === resultFile.resultType ||
-          exports.ResultFile.ResultType.TRACE === resultFile.resultType) {
+          exports.ResultFile.ResultType.GZIP === resultFile.resultType) {
         // Images and pcaps must be uploaded to the RESULT_IMAGE_SERVLET, with no
         // resultType or run/cache parts.
         //

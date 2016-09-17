@@ -35,6 +35,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "requests.h"
 #include <wininet.h>
 #include <zlib.h>
+#include <brotli/decode.h>
 
 const DWORD MAX_DATA_TO_RETAIN = 10485760;  // 10MB
 const __int64 NS100_TO_SEC = 10000000;   // convert 100ns intervals to seconds
@@ -44,12 +45,12 @@ const __int64 NS100_TO_SEC = 10000000;   // convert 100ns intervals to seconds
 bool DataChunk::ModifyDataOut(const WptTest& test) {
   bool is_modified = false;
   const char * data = GetData();
-  unsigned long data_len = GetLength();
+  size_t data_len = GetLength();
   if (data && data_len > 0) {
     CStringA headers;
     CStringA line;
     const char * current_data = data;
-    unsigned long current_data_len = data_len;
+    size_t current_data_len = data_len;
     while(current_data_len) {
       if (*current_data == '\r' || *current_data == '\n') {
         if(!line.IsEmpty()) {
@@ -75,8 +76,8 @@ bool DataChunk::ModifyDataOut(const WptTest& test) {
     }
     if (is_modified) {
       DataChunk new_chunk;
-      DWORD headers_len = headers.GetLength();
-      DWORD new_len = headers_len + current_data_len;
+      size_t headers_len = headers.GetLength();
+      size_t new_len = headers_len + current_data_len;
       LPSTR new_data = new_chunk.AllocateLength(new_len);
       memcpy(new_data, (LPCSTR)headers, headers_len);
       if (current_data_len) {
@@ -101,7 +102,11 @@ void HttpData::AddChunk(DataChunk& chunk) {
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void HttpData::AddHeader(const char * header, const char * value) {
-  _header_fields.AddTail(HeaderField(header, value));
+  if (header && value && lstrlenA(header) < 100 &&
+      !IsBinaryContent((const LPBYTE)header, lstrlenA(header)) &&
+      !IsBinaryContent((const LPBYTE)value, lstrlenA(value))) {
+    _header_fields.AddTail(HeaderField(header, value));
+  }
 }
 
 /*-----------------------------------------------------------------------------
@@ -142,12 +147,12 @@ void HttpData::CopyData() {
     *data = NULL;
 
     // Copy headers boundary (if any).
-    const char * header_end = strstr(_data, "\r\n\r\n");
-    if (header_end) {
-      _headers.Empty();
-      _headers.Append(_data, header_end - _data + 4);
+      const char * header_end = strstr(_data, "\r\n\r\n");
+      if (header_end) {
+        _headers.Empty();
+        _headers.Append(_data, (int)(header_end - _data + 4));
+      }
     }
-  }
 
   if (_headers.IsEmpty() && !_header_fields.IsEmpty()) {
     POSITION pos = _header_fields.GetHeadPosition();
@@ -169,13 +174,15 @@ void HttpData::ExtractHeaderFields() {
     int line_number = 0;
     CStringA line = _headers.Tokenize("\r\n", pos);
     while (pos > 0) {
-      if (line_number > 0) {
+      if (line_number > 0 &&
+          !IsBinaryContent((LPBYTE)(LPCSTR)line, line.GetLength())) {
         line.Trim();
         int separator = line.Find(':', 1);
         if (separator > 0) {
-          _header_fields.AddTail(
-              HeaderField(line.Left(separator),
-                          line.Mid(separator + 1).Trim()));
+          CStringA name(line.Left(separator));
+          CStringA value(line.Mid(separator + 1).Trim());
+          if (name.GetLength() < 100)
+            _header_fields.AddTail(HeaderField(name, value));
         }
       }
       line_number++;
@@ -224,10 +231,26 @@ void RequestData::ProcessRequestLine() {
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void ResponseData::AddHeader(const char * header, const char * value) {
-  HttpData::AddHeader(header, value);
-  if (!lstrcmpiA(header, ":status")) {
-    _result = atoi(value);
-    _protocol_version = 2.0;
+  // validate that the header and value are both valid/printable ascii
+  if (header && value) {
+    int hlen = lstrlenA(header);
+    int vlen = lstrlenA(value);
+    if (hlen > 0 && vlen >= 0 && hlen < 100000 && vlen < 100000) {
+      CStringA hFiltered, vFiltered;
+      for (int i = 0; i < hlen; i++)
+        if (isprint(header[i]))
+          hFiltered += header[i];
+      for (int i = 0; i < vlen; i++)
+        if (isprint(value[i]))
+          vFiltered += value[i];
+      if (hFiltered.GetLength()) {
+        HttpData::AddHeader(hFiltered, vFiltered);
+        if (!lstrcmpiA(header, ":status")) {
+          _result = atoi(value);
+          _protocol_version = 2.0;
+        }
+      }
+    }
   }
 }
 
@@ -332,19 +355,19 @@ DataChunk ResponseData::GetBody(bool uncompress) {
   ret = _body;
   if (uncompress && GetHeader("content-encoding").Find("gzip") >= 0) {
     LPBYTE body_data = (LPBYTE)ret.GetData();
-    DWORD body_len = ret.GetLength();
+    size_t body_len = ret.GetLength();
     if (body_data && body_len) {
-      DWORD len = body_len * 10;
+      size_t len = body_len * 10;
       LPBYTE buff = (LPBYTE)malloc(len);
       if (buff) {
         z_stream d_stream;
         memset( &d_stream, 0, sizeof(d_stream) );
         d_stream.next_in  = body_data;
-        d_stream.avail_in = body_len;
+        d_stream.avail_in = (uInt)body_len;
         int err = inflateInit2(&d_stream, MAX_WBITS + 16);
         if (err == Z_OK) {
           d_stream.next_out = buff;
-          d_stream.avail_out = len;
+          d_stream.avail_out = (uInt)len;
           while (((err = inflate(&d_stream, Z_SYNC_FLUSH)) == Z_OK) 
                     && d_stream.avail_in) {
             len *= 2;
@@ -353,7 +376,7 @@ DataChunk ResponseData::GetBody(bool uncompress) {
               break;
             
             d_stream.next_out = buff + d_stream.total_out;
-            d_stream.avail_out = len - d_stream.total_out;
+            d_stream.avail_out = (uInt)len - d_stream.total_out;
           }
         
           if (d_stream.total_out) {
@@ -368,6 +391,45 @@ DataChunk ResponseData::GetBody(bool uncompress) {
         free(buff);
       }
     }
+  } else if (uncompress && GetHeader("content-encoding").Find("br") >= 0) {
+    LPBYTE body_data = (LPBYTE)ret.GetData();
+    size_t body_len = ret.GetLength();
+    if (body_data && body_len) {
+      size_t len = body_len * 10;
+      LPBYTE buff = (LPBYTE)malloc(len);
+      if (buff) {
+        size_t available_in = body_len;
+        size_t available_out = len;
+        const uint8_t* next_in = body_data;
+        uint8_t* next_out = buff;
+        size_t total_out = 0;
+        BrotliState* s = BrotliCreateState(NULL, NULL, NULL);
+        if (s) {
+          bool done = false;
+          while (!done) {
+            BrotliResult result = BrotliDecompressStream(&available_in, &next_in,
+                    &available_out, &next_out, &total_out, s);
+            if (result == BROTLI_RESULT_NEEDS_MORE_OUTPUT) {
+              len *= 2;
+              buff = (LPBYTE)realloc(buff, len);
+              if( !buff )
+                break;
+              next_out = buff + total_out;
+              available_out = len - total_out;
+            } else {
+              done = true;
+            }
+          }
+          if (total_out) {
+            char * data = ret.AllocateLength(total_out);
+            if (data)
+              memcpy(data, buff, total_out);
+          }
+          BrotliDestroyState(s);
+        }
+        free(buff);
+      }
+    }
   }
 
   return ret;
@@ -377,7 +439,8 @@ DataChunk ResponseData::GetBody(bool uncompress) {
 -----------------------------------------------------------------------------*/
 Request::Request(TestState& test_state, DWORD socket_id, DWORD stream_id,
                  DWORD request_id, TrackSockets& sockets, TrackDns& dns,
-                 WptTest& test, bool is_spdy, Requests& requests)
+                 WptTest& test, bool is_spdy, Requests& requests,
+                 CString protocol)
   : _processed(false)
   , _socket_id(socket_id)
   , _stream_id(stream_id)
@@ -406,7 +469,11 @@ Request::Request(TestState& test_state, DWORD socket_id, DWORD stream_id,
   , requests_(requests)
   , _bytes_in(0)
   , _bytes_out(0)
-  , _object_size(0) {
+  , _object_size(0)
+  , _h2_priority_depends_on(-1)
+  , _h2_priority_weight(-1)
+  , _h2_priority_exclusive(-1)
+  , _protocol(protocol) {
   QueryPerformanceCounter(&_start);
   _first_byte.QuadPart = 0;
   _end.QuadPart = 0;
@@ -445,7 +512,7 @@ void Request::DataIn(DataChunk& chunk) {
     if (!_first_byte.QuadPart)
       _first_byte.QuadPart = _end.QuadPart;
     if (!_is_spdy) {
-      _bytes_in += chunk.GetLength();
+      _bytes_in += (DWORD)chunk.GetLength();
       _response_data.AddChunk(chunk);
     }
   }
@@ -480,8 +547,8 @@ void Request::DataOut(DataChunk& chunk) {
   }
   if (_is_active && !_is_spdy) {
     // Keep track of the data that was actually sent.
-    unsigned long chunk_len = chunk.GetLength();
-    _bytes_out += chunk_len;
+    size_t chunk_len = chunk.GetLength();
+    _bytes_out += (DWORD)chunk_len;
     if (chunk_len > 0) {
       if (!_are_headers_complete &&
           chunk_len >= 4 && strstr(chunk.GetData(), "\r\n\r\n")) {
@@ -533,7 +600,7 @@ void Request::BytesIn(size_t len) {
   WptTrace(loglevel::kFunction, _T("[wpthook] - Request::BytesIn(%d)"), len);
   EnterCriticalSection(&cs);
   if (_is_active)
-    _bytes_in += len;
+    _bytes_in += (DWORD)len;
   LeaveCriticalSection(&cs);
 }
 
@@ -579,7 +646,7 @@ void Request::BytesOut(size_t len) {
   WptTrace(loglevel::kFunction, _T("[wpthook] - Request::BytesOut(%d)"), len);
   EnterCriticalSection(&cs);
   if (_is_active)
-    _bytes_out += len;
+    _bytes_out += (DWORD)len;
   LeaveCriticalSection(&cs);
 }
 
@@ -644,18 +711,20 @@ bool Request::Process() {
       }
     }
 
-    _test_state._requests++;
-    if (_start.QuadPart <= _test_state._on_load.QuadPart)
-      _test_state._doc_requests++;
-    int result = GetResult();
-    if (!_test_state._first_byte.QuadPart && result == 200 && 
-        _first_byte.QuadPart )
-      _test_state._first_byte.QuadPart = _first_byte.QuadPart;
-    if (result != 401 && (result >= 400 || result < 0)) {
-      if (_test_state._test_result == TEST_RESULT_NO_ERROR)
-        _test_state._test_result = TEST_RESULT_CONTENT_ERROR;
-      else if (_test_state._test_result == TEST_RESULT_TIMEOUT)
-        _test_state._test_result = TEST_RESULT_TIMEOUT_CONTENT_ERROR;
+    if (ret) {
+      _test_state._requests++;
+      if (_start.QuadPart <= _test_state._on_load.QuadPart)
+        _test_state._doc_requests++;
+      int result = GetResult();
+      if (!_test_state._first_byte.QuadPart && result == 200 && 
+          _first_byte.QuadPart )
+        _test_state._first_byte.QuadPart = _first_byte.QuadPart;
+      if (result != 401 && (result >= 400 || result < 0)) {
+        if (_test_state._test_result == TEST_RESULT_NO_ERROR)
+          _test_state._test_result = TEST_RESULT_CONTENT_ERROR;
+        else if (_test_state._test_result == TEST_RESULT_TIMEOUT)
+          _test_state._test_result = TEST_RESULT_TIMEOUT_CONTENT_ERROR;
+      }
     }
 
     CStringA user_agent = GetRequestHeader("User-Agent");
@@ -887,3 +956,11 @@ ULONG Request::GetPeerAddress() {
   return _peer_address;
 }
 
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void Request::SetPriority(int depends_on, int weight, int exclusive) {
+  WptTrace(loglevel::kFunction, _T("[wpthook] - Request::SetPriority(), depends on %d, weight %d, exclusive %d"), depends_on, weight, exclusive);
+  _h2_priority_depends_on = depends_on;
+  _h2_priority_weight = weight;
+  _h2_priority_exclusive = exclusive;
+}

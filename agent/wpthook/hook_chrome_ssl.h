@@ -28,7 +28,20 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #pragma once
 
-#include "ncodehook/NCodeHookInstantiation.h"
+#include <stdint.h>
+
+#ifdef _WIN64
+class TestState;
+class TrackSockets;
+class WptTestHook;
+class ChromeSSLHook
+{
+public:
+  ChromeSSLHook(TrackSockets& sockets, TestState& test_state, WptTestHook& test){}
+  ~ChromeSSLHook(){}
+  void Init(){}
+};
+#else
 
 class TestState;
 class TrackSockets;
@@ -37,7 +50,9 @@ class WptTestHook;
 typedef int (__cdecl *PFN_SSL3_NEW)(void *ssl);
 typedef void (__cdecl *PFN_SSL3_FREE)(void *ssl);
 typedef int (__cdecl *PFN_SSL3_CONNECT)(void *ssl);
-typedef int (__cdecl *PFN_SSL3_READ_APP_DATA)(void *ssl, uint8_t *buf, int len, int peek);
+typedef int (__cdecl *PFN_SSL3_BEGIN_HANDSHAKE)(void *ssl);
+typedef int (__cdecl *PFN_SSL3_READ_APP_DATA_OLD)(void *ssl, uint8_t *buf, int len, int peek);
+typedef int (__cdecl *PFN_SSL3_READ_APP_DATA)(void *ssl, int *out_got_handshake, uint8_t *buf, int len, int peek);
 typedef int (__cdecl *PFN_SSL3_WRITE_APP_DATA)(void *ssl, const void *buf, int len);
 
 class ChromeSSLHook
@@ -50,19 +65,23 @@ public:
   int New(void *ssl);
   void Free(void *ssl);
   int Connect(void *ssl);
-  int ReadAppData(void *ssl, uint8_t *buf, int len, int peek);
+  int BeginHandshake(void *ssl);
+  int ReadAppDataOld(void *ssl, uint8_t *buf, int len, int peek);
+  int ReadAppData(void *ssl, int *out_got_handshake, uint8_t *buf, int len, int peek);
   int WriteAppData(void *ssl, const void *buf, int len);
 
 private:
   TestState& test_state_;
   TrackSockets& sockets_;
   WptTestHook& test_;
-  NCodeHookIA32* hook_;
   CRITICAL_SECTION cs;
 
-  PFN_SSL3_NEW            New_;
-  PFN_SSL3_FREE           Free_;
-  PFN_SSL3_CONNECT        Connect_;
-  PFN_SSL3_READ_APP_DATA  ReadAppData_;
-  PFN_SSL3_WRITE_APP_DATA WriteAppData_;
+  PFN_SSL3_NEW              New_;
+  PFN_SSL3_FREE             Free_;
+  PFN_SSL3_CONNECT          Connect_;
+  PFN_SSL3_BEGIN_HANDSHAKE  BeginHandshake_;
+  PFN_SSL3_READ_APP_DATA_OLD    ReadAppDataOld_;
+  PFN_SSL3_READ_APP_DATA    ReadAppData_;
+  PFN_SSL3_WRITE_APP_DATA   WriteAppData_;
 };
+#endif // _WIN64

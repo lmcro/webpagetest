@@ -32,11 +32,14 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "wpthook.h"
 #include "../wptdriver/wpt_test.h"
 
-static LPCTSTR blocked_domains[] = {
-  _T(".pack.google.com"),     // Chrome crx update URL
-  _T(".gvt1.com"),            // Chrome crx update URL
-  _T("clients1.google.com"),  // Autofill update downloads
-  _T("shavar.services.mozilla.com"), // Firefox tracking protection updates
+static LPCSTR blocked_domains[] = {
+  ".*\\.pack\\.google\\.com",          // Chrome crx update URL
+  ".*\\.gvt1\\.com",                   // Chrome crx update URL
+  "clients1\\.google\\.com",           // Autofill update downloads
+  "shavar\\.services\\.mozilla\\.com", // Firefox tracking protection updates
+  "shavar\\.stage\\.mozaws\\.net",
+  "aus[^\\.]*\\.mozilla\\.org",        // Firefox update service
+  "cdm\\.download\\.adobe\\.com",      // Firefox adobe updates
   NULL
 };
 
@@ -60,13 +63,38 @@ TrackDns::~TrackDns(void){
 -----------------------------------------------------------------------------*/
 bool TrackDns::BlockLookup(CString name) {
   bool block = false;
-  LPCTSTR * domain = blocked_domains;
   name.MakeLower();
+
+  // Check the hard-coded block list
+  LPCSTR * domain = blocked_domains;
+  CStringA check_name(CT2A((LPCTSTR)name, CP_UTF8));
   while (*domain && !block) {
-    if (name.Find(*domain) != -1)
+    if (RegexMatch(check_name, *domain))
       block = true;
     domain++;
   }
+
+  // Check the list from the blockDomains script command
+  if (!_test._block_domains.IsEmpty()) {
+    POSITION pos = _test._block_domains.GetHeadPosition();
+    while (!block && pos) {
+      CString block_domain = _test._block_domains.GetNext(pos);
+      if (!block_domain.CompareNoCase(name))
+        block = true;
+    }
+  }
+
+  // Check the list from the blockDomainsExcept script command
+  if (!_test._block_domains_except.IsEmpty()) {
+    block = true;
+    POSITION pos = _test._block_domains_except.GetHeadPosition();
+    while (block && pos) {
+      CString allow_domain = _test._block_domains_except.GetNext(pos);
+      if (!allow_domain.CompareNoCase(name))
+        block = false;
+    }
+  }
+
   return block;
 }
 
@@ -172,13 +200,16 @@ void TrackDns::Reset() {
 }
 
 /*-----------------------------------------------------------------------------
-  For undecoded SPDY sessions (all of them), claim with IP instead of host.
+  Claim all matching DNS lookups but use the timing from the earliest
+  completed one (multiple lookups will use cached results)
 -----------------------------------------------------------------------------*/
 bool TrackDns::Claim(CString name, ULONG addr, LARGE_INTEGER before,
                      LARGE_INTEGER& start, LARGE_INTEGER& end) {
   bool is_claimed = false;
   if (!name.GetLength())
     name = GetHost(addr);
+  start.QuadPart = 0;
+  end.QuadPart = 0;
   EnterCriticalSection(&cs);
   POSITION pos = _dns_lookups.GetStartPosition();
   while (pos) {
@@ -191,8 +222,11 @@ bool TrackDns::Claim(CString name, ULONG addr, LARGE_INTEGER before,
         name == info->_name) {
       info->_accounted_for = true;
       is_claimed = true;
-      start = info->_start;
-      end = info->_end;
+      if (!start.QuadPart ||
+          (info->_start.QuadPart < start.QuadPart && info->_end.QuadPart > 0)) {
+        start = info->_start;
+        end = info->_end;
+      }
     }
   }
   LeaveCriticalSection(&cs);
@@ -305,8 +339,8 @@ void TrackDns::AddAddress(CString host, DWORD address) {
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
-int TrackDns::GetAddressCount(CString host) {
-  int count = 0;
+size_t TrackDns::GetAddressCount(CString host) {
+  size_t count = 0;
   bool found = false;
   EnterCriticalSection(&cs);
   POSITION pos = _host_addresses.GetHeadPosition();

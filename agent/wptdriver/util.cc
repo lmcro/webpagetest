@@ -813,7 +813,7 @@ bool ParseUrl(CString url, CString &scheme, CString &host,
   See if we can sniff the real content type by looking for a file signature
   https://mimesniff.spec.whatwg.org/#matching-an-image-type-pattern
 -----------------------------------------------------------------------------*/
-CString SniffMimeType(LPBYTE content, DWORD len) {
+CString SniffMimeType(const LPBYTE content, size_t len) {
   CString mime_type;
   if (len && content) {
     LPBYTE b = content;
@@ -896,7 +896,7 @@ CString SniffMimeType(LPBYTE content, DWORD len) {
   Scan the content to see if it is a binary content type
   https://mimesniff.spec.whatwg.org/#sniffing-a-mislabeled-binary-resource
 -----------------------------------------------------------------------------*/
-bool IsBinaryContent(LPBYTE content, DWORD len) {
+bool IsBinaryContent(const LPBYTE content, size_t len) {
   bool is_binary = false;
 
   if (content) {
@@ -925,4 +925,154 @@ bool IsBinaryContent(LPBYTE content, DWORD len) {
   }
 
   return is_binary;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+static LPTSTR GetAppInitString(LPCTSTR new_dll, HKEY hKey) {
+  LPTSTR dlls = NULL;
+  DWORD len = 0;
+
+  ATLTRACE(_T("GetAppInitString"));
+
+  // get the existing appinit list
+  if (RegQueryValueEx(hKey, _T("AppInit_DLLs"), 0, NULL, NULL, &len) ==
+      ERROR_SUCCESS) {
+    if (new_dll && lstrlen(new_dll))
+      len += (lstrlen(new_dll) + 2) * sizeof(TCHAR);
+    dlls = (LPTSTR)malloc(len);
+    memset(dlls, 0, len);
+    DWORD bytes = len;
+    RegQueryValueEx(hKey, _T("AppInit_DLLs"), 0, NULL, (LPBYTE)dlls, &bytes);
+  }
+
+  // allocate memory in case there wasn't an existing list
+  if (!dlls && new_dll && lstrlen(new_dll)) {
+    len = (lstrlen(new_dll) + 1) * sizeof(TCHAR);
+    dlls = (LPTSTR)malloc(len);
+    memset(dlls, 0, len);
+  }
+
+  // remove any occurences of wptload.dll, wptld64.dll and wptld64.dll from the list
+  if (dlls && lstrlen(dlls)) {
+    LPTSTR new_list = (LPTSTR)malloc(len);
+    memset(new_list, 0, len);
+    LPTSTR dll = _tcstok(dlls, _T(" ,"));
+    while (dll) {
+      if (lstrcmpi(PathFindFileName(dll), _T("wptload.dll")) &&
+          lstrcmpi(PathFindFileName(dll), _T("wptld64.dll")) &&
+          lstrcmpi(PathFindFileName(dll), _T("wptldr64.dll"))) {
+        if (lstrlen(new_list))
+          lstrcat(new_list, _T(","));
+        lstrcat(new_list, dll);
+      }
+      dll = _tcstok(NULL, _T(" ,"));
+    }
+    free(dlls);
+    dlls = new_list;
+  }
+
+  // add the new dll to the list
+  if (dlls && new_dll && lstrlen(new_dll)) {
+    if (lstrlen(dlls))
+      lstrcat(dlls, _T(","));
+    lstrcat(dlls, new_dll);
+  }
+
+  ATLTRACE(_T("GetAppInitString: '%s'"), dlls);
+
+  return dlls;
+}
+
+/*-----------------------------------------------------------------------------
+  Install the AppInit hook dll and use the exe to determine if it is for
+  64-bit or 32 (and only install the needed hook)
+-----------------------------------------------------------------------------*/
+bool InstallAppInitHook(LPCTSTR exe) {
+  ATLTRACE(_T("InstallAppInitHook - %s"), exe);
+  bool installed = false;
+
+  // See if we need the 64-bit version
+  DWORD reg_flags = 0;
+  LPCTSTR hook_dll = _T("wptload.dll");
+  BOOL is64bit = FALSE;
+  if (IsWow64Process(GetCurrentProcess(), &is64bit) && is64bit) {
+    DWORD binary_type = 0;
+    if (GetBinaryType(exe, &binary_type)) {
+      if (binary_type == SCS_64BIT_BINARY) {
+        reg_flags = KEY_WOW64_64KEY;
+        hook_dll = _T("wptldr64.dll");
+      }
+    }
+    ATLTRACE(_T("InstallAppInitHook - Binary type: %d"), binary_type);
+  }
+
+  // Update the AppInit registry key
+  TCHAR path[MAX_PATH];
+  if (GetModuleFileName(NULL, path, _countof(path))) {
+    lstrcpy(PathFindFileName(path), hook_dll);
+    TCHAR short_path[MAX_PATH];
+    if (GetShortPathName(path, short_path, _countof(short_path))) {
+      HKEY hKey;
+		  if (RegCreateKeyEx(HKEY_LOCAL_MACHINE,
+          _T("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows"),
+          0, 0, 0, KEY_READ | KEY_WRITE | reg_flags, 0,
+          &hKey, 0) == ERROR_SUCCESS ) {
+			  DWORD val = 1;
+			  RegSetValueEx(hKey, _T("LoadAppInit_DLLs"), 0, REG_DWORD,
+                      (const LPBYTE)&val, sizeof(val));
+			  val = 0;
+			  RegSetValueEx(hKey, _T("RequireSignedAppInit_DLLs"), 0, REG_DWORD,
+                      (const LPBYTE)&val, sizeof(val));
+        LPTSTR dlls = GetAppInitString(short_path, hKey);
+        if (dlls) {
+			    RegSetValueEx(hKey, _T("AppInit_DLLs"), 0, REG_SZ,
+                        (const LPBYTE)dlls,
+                        (lstrlen(dlls) + 1) * sizeof(TCHAR));
+          free(dlls);
+        }
+        RegCloseKey(hKey);
+      }
+    }
+  }
+
+  return installed;
+  ATLTRACE(_T("InstallAppInitHook - Done"));
+}
+
+/*-----------------------------------------------------------------------------
+  Remove the WPT hook dll's from the AppInit dll entries
+-----------------------------------------------------------------------------*/
+void ClearAppInitHooks() {
+  HKEY hKey;
+  ATLTRACE(_T("ClearAppInitHooks"));
+	if (RegCreateKeyEx(HKEY_LOCAL_MACHINE,
+      _T("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows"),
+      0, 0, 0, KEY_READ | KEY_WRITE, 0, &hKey, 0) == ERROR_SUCCESS ) {
+    LPTSTR dlls = GetAppInitString(NULL, hKey);
+    if (dlls) {
+			RegSetValueEx(hKey, _T("AppInit_DLLs"), 0, REG_SZ,
+                    (const LPBYTE)dlls,
+                    (lstrlen(dlls) + 1) * sizeof(TCHAR));
+      free(dlls);
+    }
+    RegCloseKey(hKey);
+  }
+  BOOL is64bit = FALSE;
+  if (IsWow64Process(GetCurrentProcess(), &is64bit) && is64bit) {
+	  if (RegCreateKeyEx(HKEY_LOCAL_MACHINE,
+        _T("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows"),
+        0, 0, 0, KEY_READ | KEY_WRITE | KEY_WOW64_64KEY, 0,
+        &hKey, 0) == ERROR_SUCCESS ) {
+      LPTSTR dlls = GetAppInitString(NULL, hKey);
+      if (dlls) {
+			  RegSetValueEx(hKey, _T("AppInit_DLLs"), 0, REG_SZ,
+                      (const LPBYTE)dlls,
+                      (lstrlen(dlls) + 1) * sizeof(TCHAR));
+        free(dlls);
+      }
+      RegCloseKey(hKey);
+    }
+  }
+  ATLTRACE(_T("ClearAppInitHooks - Done"));
 }

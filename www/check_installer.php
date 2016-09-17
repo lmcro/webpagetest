@@ -9,14 +9,26 @@ error_reporting(E_ERROR | E_PARSE);
 $has_apc = function_exists('apc_fetch') && function_exists('apc_store');
 
 $ok = false;
-if (isset($_REQUEST['installer']) && isset($_SERVER['REMOTE_ADDR'])) {
+$ip = $_SERVER["REMOTE_ADDR"];
+if (isset($_SERVER["HTTP_X_FORWARDED_FOR"])) {
+  $forwarded = explode(',',$_SERVER["HTTP_X_FORWARDED_FOR"]);
+  if (isset($forwarded) && is_array($forwarded) && count($forwarded)) {
+    $forwarded_ip = trim(end($forwarded));
+    if (strlen($forwarded_ip) && $forwarded_ip != "127.0.0.1")
+        $ip = $forwarded_ip;
+  }
+}
+if (isset($_REQUEST['installer']) && isset($ip)) {
   $installer = $_REQUEST['installer'];
   $installer_postfix = GetSetting('installerPostfix');
   if ($installer_postfix) {
     $installer .= $installer_postfix;
     $ok = true;
+  } elseif ($ip == '72.66.115.14' ||  // Public WebPageTest
+            $ip == '149.20.63.13') {  // HTTP Archive
+    $ok = true;
   } elseif (preg_match('/^(software|browsers\/[-_a-zA-Z0-9]+)\.dat$/', $installer)) {
-    $ok = $has_apc ? ApcCheckIp($installer) : CheckIp($installer);
+    $ok = IsValidIp($ip, $installer);
   }
 }
 
@@ -41,9 +53,30 @@ if ($ok) {
   header('HTTP/1.0 403 Forbidden');
 }
 
-function ApcCheckIp($installer) {
+function IsValidIp($ip, $installer) {
+  global $has_apc;
   $ok = true;
-  $ip = $_SERVER["REMOTE_ADDR"];
+  
+  // Make sure it isn't on our banned IP list
+  $filename = __DIR__ . '/settings/block_installer_ip.txt';
+  if (is_file($filename)) {
+    $blocked_addresses = file($filename, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if (in_array($ip, $blocked_addresses)) {
+      $ok = false;
+    }
+  }
+
+  if ($ok ) {  
+    $ok = $has_apc ? ApcCheckIp($ip, $installer) : CheckIp($ip, $installer);
+    if (!$ok) {
+      logMsg("BLOCKED - $ip : {$_REQUEST['installer']}", "log/software.log", true);
+    }
+  }
+  return $ok;
+}
+
+function ApcCheckIp($ip, $installer) {
+  $ok = true;
   if (isset($ip) && strlen($ip)) {
     $now = time();
     $key = "inst-ip-$ip-$installer";
@@ -79,9 +112,8 @@ function ApcCheckIp($installer) {
 * 
 * @param mixed $installer
 */
-function CheckIp($installer) {
+function CheckIp($ip, $installer) {
   $ok = true;
-  $ip = $_SERVER["REMOTE_ADDR"];
   if (isset($ip) && strlen($ip)) {
     $lock = Lock("Installers", true, 5);
     if ($lock) {

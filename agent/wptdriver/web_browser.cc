@@ -48,12 +48,13 @@ static const TCHAR * CHROME_USER_AGENT =
 static const TCHAR * CHROME_DISABLE_PLUGINS = 
     _T(" --disable-plugins-discovery --disable-bundled-ppapi-flash");
 static const TCHAR * CHROME_REQUIRED_OPTIONS[] = {
-    _T("--enable-experimental-extension-apis"),
     _T("--disable-background-networking"),
     _T("--no-default-browser-check"),
     _T("--no-first-run"),
     _T("--process-per-tab"),
     _T("--new-window"),
+    _T("--silent-debugger-extension-api"),
+    _T("--disable-infobars"),
     _T("--disable-translate"),
     _T("--disable-notifications"),
     _T("--disable-desktop-notifications"),
@@ -79,13 +80,14 @@ static const TCHAR * FIREFOX_REQUIRED_OPTIONS[] = {
 -----------------------------------------------------------------------------*/
 WebBrowser::WebBrowser(WptSettings& settings, WptTestDriver& test, 
                        WptStatus &status, BrowserSettings& browser,
-                       CIpfw &ipfw):
+                       CIpfw &ipfw, DWORD wpt_ver):
   _settings(settings)
   ,_test(test)
   ,_status(status)
   ,_browser_process(NULL)
   ,_browser(browser)
-  ,_ipfw(ipfw) {
+  ,_ipfw(ipfw)
+  ,_wpt_ver(wpt_ver) {
 
   InitializeCriticalSection(&cs);
 
@@ -112,12 +114,19 @@ WebBrowser::~WebBrowser(void) {
 -----------------------------------------------------------------------------*/
 bool WebBrowser::RunAndWait() {
   bool ret = false;
+  bool is_chrome = false;
 
   // signal to the IE BHO that it needs to inject the code
   HANDLE active_event = CreateMutex(&null_dacl, TRUE, GLOBAL_TESTING_MUTEX);
+  g_shared->SetOverrodeUAString(false);
+  _browser_needs_reset.Empty();
 
   if (_test.Start() && ConfigureIpfw(_test)) {
     if (_browser._exe.GetLength()) {
+      CString exe(_browser._exe);
+      exe.MakeLower();
+      if (exe.Find(_T("chrome.exe")) >= 0)
+        CreateChromeSymlink();
       bool hook = true;
       bool hook_child = false;
       TCHAR cmdLine[32768];
@@ -126,9 +135,10 @@ bool WebBrowser::RunAndWait() {
         lstrcat( cmdLine, CString(_T(" ")) + _browser._options );
       // if we are running chrome, make sure the command line options that our 
       // extension NEEDS are present
-      CString exe(_browser._exe);
+      exe = _browser._exe;
       exe.MakeLower();
       if (exe.Find(_T("chrome.exe")) >= 0) {
+        is_chrome = true;
         ConfigureChromePreferences();
         if (_test._browser_command_line.GetLength()) {
           lstrcat(cmdLine, CString(_T(" ")) +
@@ -153,12 +163,45 @@ bool WebBrowser::RunAndWait() {
             lstrcat(cmdLine, CHROME_SOFTWARE_RENDER);
           if (_test._emulate_mobile)
             lstrcat(cmdLine, CHROME_DISABLE_PLUGINS);
+
+          CString user_agent;
           if (_test._user_agent.GetLength() &&
               _test._user_agent.Find(_T('"')) == -1) {
+            user_agent = CA2T(_test._user_agent, CP_UTF8);
+          } else if (!_test._preserve_user_agent) {
+            // See if we have a stored version of what the UA string should be
+            HKEY ua_key;
+            if (RegCreateKeyEx(HKEY_CURRENT_USER,
+                _T("Software\\WebPagetest\\wptdriver\\BrowserUAStrings"), 0, 0, 0, 
+                KEY_READ, 0, &ua_key, 0) == ERROR_SUCCESS) {
+                TCHAR buff[10000];
+                DWORD len = sizeof(buff);
+                if (RegQueryValueEx(ua_key, _test._browser, 0, 0, (LPBYTE)buff, &len) 
+                    == ERROR_SUCCESS) {
+                  user_agent = buff;
+                }
+              RegCloseKey(ua_key);
+            }
+          }
+          if (user_agent.GetLength()) {
+            if (!_test._preserve_user_agent) {
+              CString append, buff;
+              CString product = _test._append_user_agent.GetLength() ? 
+                  CA2T(_test._append_user_agent, CP_UTF8) : _T("PTST");
+              append.Format(_T(" %s/%d"), (LPCTSTR)product, _wpt_ver);
+              append.Replace(_T("%TESTID%"), _test._id);
+              buff.Format(_T("%d"), _test._run);
+              append.Replace(_T("%RUN%"), buff);
+              append.Replace(_T("%CACHED%"), _test._clear_cache ? _T("0") : _T("1"));
+              buff.Format(_T("%d"), _test._version);
+              append.Replace(_T("%VERSION%"), buff);
+              user_agent += append;
+            }
             lstrcat(cmdLine, CHROME_USER_AGENT);
             lstrcat(cmdLine, _T("\""));
-            lstrcat(cmdLine, CA2T(_test._user_agent, CP_UTF8));
+            lstrcat(cmdLine, user_agent);
             lstrcat(cmdLine, _T("\""));
+            g_shared->SetOverrodeUAString(true);
           }
         }
         if (_test._browser_additional_command_line.GetLength()) {
@@ -195,7 +238,7 @@ bool WebBrowser::RunAndWait() {
       SetEnvironmentVariable(L"SSLKEYLOGFILE", _test._file_base + L"_keylog.log");
       DeleteFile(_test._file_base + L"_keylog.log");
 
-      _status.Set(_T("Launching: %s\n"), cmdLine);
+      _status.Set(_T("Launching: %s"), cmdLine);
 
       STARTUPINFO si;
       PROCESS_INFORMATION pi;
@@ -217,18 +260,35 @@ bool WebBrowser::RunAndWait() {
 
       // Launch the browser and wait for the hook to start
       TerminateProcessesByName(PathFindFileName((LPCTSTR)_browser._exe));
-      SetBrowserExe(PathFindFileName((LPCTSTR)_browser._exe));
+      g_shared->SetBrowserExe(PathFindFileName((LPCTSTR)_browser._exe));
       if (_browser_started_event && _browser_done_event) {
         ResetEvent(_browser_started_event);
         ResetEvent(_browser_done_event);
-
+        InstallAppInitHook(_browser._exe);
         if (CreateProcess(_browser._exe, cmdLine, NULL, NULL, FALSE,
                           0, NULL, NULL, &si, &pi)) {
+          DWORD wait_time = 60000;
+          #ifdef DEBUG
+          wait_time = INFINITE;
+          #endif
+          // see if we need to do a re-launch of Chrome (seems to be necessary with the latest canary)
+          if (is_chrome) {
+            HANDLE events[2];
+            events[0] = pi.hProcess;
+            events[1] = _browser_started_event;
+            if (WaitForMultipleObjects(2, events, FALSE, wait_time) == WAIT_OBJECT_0) {
+              CloseHandle(pi.hThread);
+              CloseHandle(pi.hProcess);
+              Sleep(5000);
+              CreateProcess(_browser._exe, cmdLine, NULL, NULL, FALSE,
+                          0, NULL, NULL, &si, &pi);
+            }
+          }
           CloseHandle(pi.hThread);
           CloseHandle(pi.hProcess);
-          if (WaitForSingleObject(_browser_started_event, 60000) ==
+          if (WaitForSingleObject(_browser_started_event, wait_time) ==
               WAIT_OBJECT_0) {
-            DWORD pid = GetBrowserProcessId();
+            DWORD pid = g_shared->BrowserProcessId();
             if (pid) {
               _browser_process = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE,
                                              FALSE, pid);
@@ -244,6 +304,7 @@ bool WebBrowser::RunAndWait() {
           _test._run_error = "Failed to launch the browser.";
         }
         LeaveCriticalSection(&cs);
+        ClearAppInitHooks();
 
         // wait for the browser to finish (infinite timeout if we are debugging)
         if (_browser_process && ok) {
@@ -272,7 +333,7 @@ bool WebBrowser::RunAndWait() {
       LeaveCriticalSection(&cs);
       TerminateProcessesByName(PathFindFileName((LPCTSTR)_browser._exe));
 
-      SetBrowserExe(NULL);
+      g_shared->SetBrowserExe(NULL);
       ResetIpfw();
 
     } else {
@@ -361,15 +422,15 @@ bool WebBrowser::ConfigureIpfw(WptTestDriver& test) {
                 test._latency, test._plr );
     ATLTRACE(buff);
 
-    if (_ipfw.SetPipe(PIPE_IN, test._bwIn, latency,test._plr/100.0)) {
+    if (_ipfw.SetPipe(PIPE_IN, test._bwIn, latency, test._plr/100.0, true)) {
       // make up for odd values
       if( test._latency % 2 )
         latency++;
 
-      if (_ipfw.SetPipe(PIPE_OUT, test._bwOut,latency,test._plr/100.0))
+      if (_ipfw.SetPipe(PIPE_OUT, test._bwOut,latency,test._plr/100.0, false))
         ret = true;
       else
-        _ipfw.SetPipe(PIPE_IN, 0, 0, 0);
+        _ipfw.SetPipe(PIPE_IN, 0, 0, 0, true);
     }
   }
   else
@@ -386,8 +447,8 @@ bool WebBrowser::ConfigureIpfw(WptTestDriver& test) {
   Remove the bandwidth throttling
 -----------------------------------------------------------------------------*/
 void WebBrowser::ResetIpfw(void) {
-  _ipfw.SetPipe(PIPE_IN, 0, 0, 0);
-  _ipfw.SetPipe(PIPE_OUT, 0, 0, 0);
+  _ipfw.SetPipe(PIPE_IN, 0, 0, 0, true);
+  _ipfw.SetPipe(PIPE_OUT, 0, 0, 0, false);
 }
 
 /*-----------------------------------------------------------------------------
@@ -723,6 +784,9 @@ void WebBrowser::ConfigureChromePreferences() {
   LPCSTR prefs =
     "{"
       "\"profile\":{"
+        "\"default_content_setting_values\":{"
+          "\"geolocation\":2"
+        "},"
         "\"password_manager_enabled\":false"
       "}"
     "}";
@@ -738,5 +802,24 @@ void WebBrowser::ConfigureChromePreferences() {
     DWORD written = 0;
     WriteFile(file, prefs, strlen(prefs), &written, 0);
     CloseHandle(file);
+  }
+}
+
+/*-----------------------------------------------------------------------------
+  Run Chrome from inside of a "Chrome SxS\\Application
+-----------------------------------------------------------------------------*/
+void WebBrowser::CreateChromeSymlink() {
+  CString lower(_browser._exe);
+  lower.MakeLower();
+  int pos = lower.Find(_T("chrome\\application\\chrome.exe"));
+  if (pos > 0 && lower.Find(_T("chrome sxs\\application")) == -1) {
+    CString dir = _browser._exe.Left(pos) + _T("Chrome");
+    CString newDir = dir + _T(" SxS");
+
+    RemoveDirectory(newDir);
+    if (CreateSymbolicLink(newDir, dir, SYMBOLIC_LINK_FLAG_DIRECTORY)) {
+      _browser_needs_reset = _browser._exe;
+      _browser._exe = newDir + "\\Application\\chrome.exe";
+    }
   }
 }

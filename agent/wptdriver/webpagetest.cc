@@ -50,9 +50,10 @@ WebPagetest::WebPagetest(WptSettings &settings, WptStatus &status):
   ,has_gpu_(false)
   ,rebooting_(false) {
   SetErrorMode(SEM_FAILCRITICALERRORS);
-  // get the version number of the binary (for software updates)
+  // get the version number of the wpthook.dll binary (for software updates)
   TCHAR file[MAX_PATH];
   if (GetModuleFileName(NULL, file, _countof(file))) {
+    lstrcpy(PathFindFileName(file), _T("wpthook.dll"));
     DWORD unused;
     DWORD infoSize = GetFileVersionInfoSize(file, &unused);
     if (infoSize) {
@@ -89,7 +90,9 @@ WebPagetest::WebPagetest(WptSettings &settings, WptStatus &status):
   TCHAR name[MAX_COMPUTERNAME_LENGTH + 1];
   DWORD len = _countof(name);
   name[0] = 0;
-  if (GetComputerName(name, &len) && lstrlen(name)) {
+  if (!GetNameFromMAC(name, len))
+    GetComputerName(name, &len);
+  if (lstrlen(name)) {
     TCHAR escaped[INTERNET_MAX_URL_LENGTH];
     len = _countof(escaped);
     if ((UrlEscape(name, escaped, &len, URL_ESCAPE_SEGMENT_ONLY | 
@@ -100,6 +103,56 @@ WebPagetest::WebPagetest(WptSettings &settings, WptStatus &status):
 
   _screenWidth = GetSystemMetrics(SM_CXSCREEN);
   _screenHeight = GetSystemMetrics(SM_CYSCREEN);
+}
+
+/*-----------------------------------------------------------------------------
+  For special cases where we use VMWare-reserved MAC addresses we can auto-name
+  the PC based on the assigned MAC address in the form of:
+  00:50:56:00:<vm server number>:<machine number>
+-----------------------------------------------------------------------------*/
+bool WebPagetest::GetNameFromMAC(LPTSTR name, DWORD &len) {
+  bool ret = false;
+  ULONG addr_len = 15000;
+  IP_ADAPTER_ADDRESSES * addresses = NULL;
+  DWORD ret_val = NO_ERROR;
+  DWORD attempts = 0;
+  do {
+    attempts++;
+    addresses = (IP_ADAPTER_ADDRESSES *)malloc(addr_len);
+    if (addresses) {
+      ret_val = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_PREFIX,
+                                     NULL, addresses, &addr_len);
+      if (ret_val != NO_ERROR) {
+        free(addresses);
+        addresses = NULL;
+      }
+    } else {
+      break;
+    }
+  } while ((ret_val == ERROR_BUFFER_OVERFLOW) && (attempts <= 2));
+
+  if (ret_val == NO_ERROR && addresses) {
+    IP_ADAPTER_ADDRESSES * addr = addresses;
+    while (addr) {
+      if (addr->PhysicalAddressLength == 6 &&
+          addr->PhysicalAddress[0] == 0x00 &&
+          addr->PhysicalAddress[1] == 0x50 &&
+          addr->PhysicalAddress[2] == 0x56 &&
+          addr->PhysicalAddress[3] == 0x00) {
+        DWORD server = addr->PhysicalAddress[4];
+        DWORD machine = addr->PhysicalAddress[5];
+        wsprintf(name, _T("VM%X-%02X"), server, machine);
+        len = lstrlen(name);
+        ret = true;
+      }
+      addr = addr->Next;
+    }
+  }
+
+  if (addresses)
+    free(addresses);
+
+  return ret;
 }
 
 /*-----------------------------------------------------------------------------
@@ -139,6 +192,8 @@ bool WebPagetest::GetTest(WptTestDriver& test) {
     url += CString(_T("&pc=")) + _computer_name;
   if (_settings._ec2_instance.GetLength())
     url += CString(_T("&ec2=")) + _settings._ec2_instance;
+  if (_settings._ec2_availability_zone.GetLength())
+    url += CString(_T("&ec2zone=")) + _settings._ec2_availability_zone;
   if (_settings._azure_instance.GetLength())
     url += CString(_T("&azure=")) + _settings._azure_instance;
   if (_dns_servers.GetLength())
@@ -200,7 +255,7 @@ bool WebPagetest::UploadIncrementalResults(WptTestDriver& test) {
     ret = UploadImages(test, image_files);
     if (ret) {
       ret = UploadData(test, false);
-      SetCPUUtilization(0);
+      g_shared->SetCPUUtilization(0);
     }
   } else {
     DeleteIncrementalResults(test);
@@ -222,7 +277,7 @@ bool WebPagetest::TestDone(WptTestDriver& test){
   ret = UploadImages(test, image_files);
   if (ret) {
     ret = UploadData(test, true);
-    SetCPUUtilization(0);
+    g_shared->SetCPUUtilization(0);
   }
 
   ATLTRACE(_T("[wptdriver] - Test Done"));
@@ -270,8 +325,22 @@ bool WebPagetest::UploadImages(WptTestDriver& test,
   POSITION pos = image_files.GetHeadPosition();
   while (ret && pos) {
     CString file = image_files.GetNext(pos);
-    if (!test._discard_test)
-      ret = UploadFile(url, false, test, file);
+    if (!test._discard_test) {
+      if (test._process_results) {
+        CAtlList<CString> newFiles;
+        if (ProcessFile(file, newFiles)) {
+          POSITION newFilePos = newFiles.GetHeadPosition();
+          while (ret && newFilePos) {
+            CString newFile = newFiles.GetNext(newFilePos);
+            ret = UploadFile(url, false, test, newFile);
+            if (ret)
+              DeleteFile(newFile);
+          }
+        }
+      }
+      if (ret)
+        ret = UploadFile(url, false, test, file);
+    }
     if (ret)
       DeleteFile(file);
   }
@@ -745,7 +814,7 @@ void WebPagetest::BuildFormData(WptSettings& settings, WptTestDriver& test,
     form_data += CStringA(CT2A(_dns_servers)) + "\r\n";
   }
 
-  int cpu_utilization = GetCPUUtilization();
+  int cpu_utilization = g_shared->CPUUtilization();
   if (cpu_utilization > 0) {
     form_data += CStringA("--") + boundary + "\r\n";
     form_data += "Content-Disposition: form-data; name=\"cpu\"\r\n\r\n";
@@ -1110,4 +1179,66 @@ void WebPagetest::UpdateDNSServers() {
     if (addresses)
       free(addresses);
   }
+}
+
+/*-----------------------------------------------------------------------------
+  Run python-based post-processing on the trace, pcap, etc files
+-----------------------------------------------------------------------------*/
+bool WebPagetest::ProcessFile(CString file, CAtlList<CString> &newFiles) {
+  bool hasNewFiles = false;
+  int pos = -1;
+  if ((pos = file.Find(_T("trace.json"))) >= 0) {
+    CString cpuFile = file.Left(pos) + _T("timeline_cpu.json.gz");
+    CString userTimingFile = file.Left(pos) + _T("user_timing.json.gz");
+    CString featureUsageFile = file.Left(pos) + _T("feature_usage.json.gz");
+    CString options;
+    options.Format(_T("-t \"%s\" -c \"%s\" -u \"%s\" -f \"%s\""),
+                   (LPCTSTR)file, (LPCTSTR)cpuFile, (LPCTSTR)userTimingFile,
+                   (LPCTSTR)featureUsageFile);
+    if (RunPythonScript(_T("trace-parser.py"), options)) {
+      if (FileExists(cpuFile)) {
+        hasNewFiles = true;
+        newFiles.AddTail(cpuFile);
+      }
+      if (FileExists(userTimingFile)) {
+        hasNewFiles = true;
+        newFiles.AddTail(userTimingFile);
+      }
+    }
+  } else if ((pos = file.Find(_T(".cap"))) >= 0) {
+    CString slicesFile = file.Left(pos) + _T("_pcap_slices.json.gz");
+    CString options;
+    options.Format(_T("-i \"%s\" -d \"%s\""),
+                   (LPCTSTR)file, (LPCTSTR)slicesFile);
+    if (RunPythonScript(_T("pcap-parser.py"), options)) {
+      if (FileExists(slicesFile)) {
+        hasNewFiles = true;
+        newFiles.AddTail(slicesFile);
+      }
+    }
+  }
+  return hasNewFiles;
+}
+
+/*-----------------------------------------------------------------------------
+  Run the given python script and wait for a result (assume C:\Python27)
+-----------------------------------------------------------------------------*/
+bool WebPagetest::RunPythonScript(CString script, CString options) {
+  bool ok = false;
+  CString command_line = _T("C:\\Python27\\python.exe");
+  if (FileExists(command_line)) {
+    TCHAR dir[MAX_PATH];
+    if (GetModuleFileName(NULL, dir, _countof(dir))) {
+      *PathFindFileName(dir) = 0;
+      CString script_path = dir;
+      script_path += _T("support\\") + script;
+      if (FileExists(script_path)) {
+        command_line += _T(" \"") + script_path + _T("\"");
+        if (options.GetLength())
+          command_line += _T(" ") + options;
+        ok = LaunchProcess(command_line);
+      }
+    }
+  }
+  return ok;
 }

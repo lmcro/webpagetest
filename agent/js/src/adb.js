@@ -53,9 +53,11 @@ function Adb(app, serial, adbCommand) {
   'use strict';
   this.app_ = app;
   this.adbCommand = adbCommand || process.env.ANDROID_ADB || 'adb';
-  this.serial = serial;
+  this.serial = serial || undefined;
   this.isUserDebug_ = undefined;
   this.storagePath_ = undefined;
+  if (this.serial == 'android')
+    this.serial = undefined;
 }
 /** Public class. */
 exports.Adb = Adb;
@@ -89,7 +91,10 @@ Adb.prototype.command_ = function(args, options, timeout) {
  */
 Adb.prototype.adb = function(args, options, timeout) {
   'use strict';
-  return this.command_(['-s', this.serial].concat(args), options, timeout);
+  if (this.serial !== undefined)
+    return this.command_(['-s', this.serial].concat(args), options, timeout);
+  else
+    return this.command_(args, options, timeout);
 };
 
 /**
@@ -187,7 +192,10 @@ Adb.prototype.spawn_ = function(args) {
  */
 Adb.prototype.spawnAdb = function(args) {
   'use strict';
-  return this.spawn_(['-s', this.serial].concat(args));
+  if (this.serial !== undefined)
+    return this.spawn_(['-s', this.serial].concat(args));
+  else
+    return this.spawn_(args);
 };
 
 /**
@@ -273,26 +281,23 @@ Adb.prototype.getStoragePath = function() {
  */
 Adb.prototype.getPidsOfProcess = function(name) {
   'use strict';
-  return this.shell(['ps', name]).then(function(stdout) {
+  return this.shell(['ps', '|', 'grep', name]).then(function(stdout) {
     var pids = [];
     var lines = stdout.split(/[\r\n]+/);
-    if (lines.length === 0 || lines[0].indexOf('USER ') !== 0) {  // Heading.
-      throw new Error(util.format('ps command failed, output: %j', stdout));
+    if (lines.length > 0) {
+      lines.forEach(function(line, iLine) {
+        if (line.length === 0) {
+          return;  // Skip empty lines (last line in particular).
+        }
+        var fields = line.split(/\s+/);
+        if (fields.length === 9) {
+          // make sure the pid field is numeric
+          var pid = fields[1];
+          if (!isNaN(parseFloat(pid)) && isFinite(pid))
+            pids.push(pid);
+        }
+      }.bind(this));
     }
-    lines.forEach(function(line, iLine) {
-      if (line.length === 0) {
-        return;  // Skip empty lines (last line in particular).
-      }
-      var fields = line.split(/\s+/);
-      if (iLine === 0) {  // Skip the header
-        return;
-      }
-      if (fields.length !== 9) {
-        throw new Error(util.format('Failed to parse ps output line %d: %j',
-            iLine, stdout));
-      }
-      pids.push(fields[1]);
-    }.bind(this));
     return pids;
   }.bind(this));
 };
@@ -405,10 +410,10 @@ Adb.prototype.scheduleGetNetworkConfiguration = function() {
         var mac = undefined;
         var isUp = false;
         var addr = undefined;
-        stdout.split(/[\r\n]+/).forEach(function(line, lineNumber) {
+        stdout.split("\n").forEach(function(line, lineNumber) {
           line = line.trim();
-          if (!line) {
-            if (iface && addr) {
+          if (!line.length) {
+            if (iface) {
               var ifc = {name: iface, ip: addr, isUp: isUp};
               if (mac) {
                 ifc.mac = mac;
@@ -523,54 +528,18 @@ Adb.prototype.scheduleDismissSystemDialog = function() {
 };
 
 /**
- * Returns a MAC address based on our device's serial id.
- *
- * Our only requirements are that the returned MAC address must be
- *   (1) deterministic (to support lease renewal and static DHCP), and
- *   (2) unique (impossible in theory, but works fine in practice).
- * so we use a hash, e.g.:
- *   serial='HT7c123abcf7'
- *   h="$(echo -n $serial | md5sum -)"  # ffd8c274e4...; on Mac use |md5)"
- *   mac="02:00:${h::2}:${h:2:2}:${h:4:2}:${h:6:2}"  # '02:00:ff:d8:c2:74'
- *
- * @return {string} A MAC address.
- * @private
- */
-Adb.prototype.computeMacForRndis_ = function() {
-  'use strict';
-  // e.g. serial = '05912b170024c3bd'
-  var hc = murmurhash(this.serial, 0);
-  // e.g. hc = 113472323
-  var s = hc.toString(16);
-  // e.g. s = '6c37343'
-  while (s.length < 8) {
-    s = '0' + s;
-  }
-  // e.g. s = '06c37343'
-  var ret = '';
-  var i;
-  for (i = 6; i >= 0; i -= 2) {
-    ret += ':' + s.substring(i, i + 2);
-  }
-  // e.g. s = ':43:73:c3:06'
-  ret = '02:00' + ret;
-  // e.g. s = '02:00:43:73:c3:06'
-  return ret;
-};
-
-/**
  * Returns the RNDIS entry.
  *
  * @param {Array.<Object>} netcfg from scheduleGetNetworkConfiguration().
  * @return {Object} member of netcfg, or undefined.
  * @private
  */
-Adb.prototype.getRndisIfc_ = function(netcfg) {
+Adb.prototype.getRndisIfc_ = function(netcfg, onlyrndis) {
   'use strict';
   var ret;
   netcfg.forEach(function(ifc) {
     if ('rndis0' === ifc.name ||  // Prefer rndis0 over usb0.
-        ('usb0' === ifc.name && undefined === ret)) {
+        (!onlyrndis && 'usb0' === ifc.name && undefined === ret)) {
       ret = ifc;
     }
   });
@@ -585,8 +554,7 @@ Adb.prototype.getRndisIfc_ = function(netcfg) {
 Adb.prototype.scheduleAssertRndisIsEnabled = function() {
   'use strict';
   return this.scheduleGetNetworkConfiguration().then(function(netcfg) {
-    var ifc = this.getRndisIfc_(netcfg);
-    var mac = this.computeMacForRndis_();
+    var ifc = this.getRndisIfc_(netcfg, false);
     var badNames = netcfg.filter(function(o) {
       return (o.isUp && 'lo' !== o.name && (!ifc || ifc.name !== o.name));
     }).map(function(o) { return o.name; });
@@ -595,7 +563,6 @@ Adb.prototype.scheduleAssertRndisIsEnabled = function() {
         !ifc ? 'netcfg lacks rndis interface' :
         !ifc.isUp ? ifc.name + ' is DOWN' :
         !ifc.ip ? ifc.name + ' lacks IP address' :
-        mac !== ifc.mac ? ifc.name + ' MAC ' + ifc.mac + ' != ' + mac :
         undefined);
     if (undefined !== err) {
       throw new Error(err);
@@ -604,79 +571,107 @@ Adb.prototype.scheduleAssertRndisIsEnabled = function() {
 };
 
 /**
- * Enables Reverse USB Tethering via RNDIS.
+/**
+ * Enables Reverse USB Tethering via RNDIS
  *
  * @return {webdriver.promise.Promise} resolve() for addErrback.
  */
-Adb.prototype.scheduleEnableRndis = function() {
+Adb.prototype.scheduleEnableRndis = function(config) {
   'use strict';
   return this.app_.schedule('Enable rndis', function() {
-    this.shell(['getprop', 'sys.usb.config']).then(function(stdout) {
-      if ('rndis,adb' !== stdout.trim()) {
-        // Enable rndis property.
-        this.su(['setprop', 'sys.usb.config', 'rndis,adb']);
+    var config_parts = config.split(",");
+    if (config_parts.length === 4) {
+      var ip = config_parts[0];
+      var gateway = config_parts[1];
+      var dns1 = config_parts[2];
+      var dns2 = config_parts[3];
+    } else {
+      throw new Error('Invalid rndis config. Should be --rndis="<ip>/24,<gateway>,<dns1>,<dns2>"');
+    }
 
-        // Wait for device to come back online (<1s).
-        this.adb(['wait-for-device']);
-      }
-    }.bind(this));
+    return this.shell(['getprop', 'ro.build.version.release']).then(function(stdout) {
+      var osVersion = parseFloat(stdout.trim());
+      return this.shell(['getprop', 'ro.com.google.clientidbase']).then(function(stdout) {
+        var kernel = stdout.trim();
 
-    this.scheduleGetNetworkConfiguration().then(function(netcfg) {
-      var ifc = this.getRndisIfc_(netcfg);
-      if (!ifc) {
-        throw new Error('netcfg lacks rndis interface');
-      }
-      var ifname = ifc.name;
-
-      // Stop WiFi if enabled.
-      var hasWifi = netcfg.some(function(ifc2) {
-        return ifc2.isUp && (/^wlan\d+$/).test(ifc2.name);
-      });
-      if (hasWifi) {
-        //this.su(['wpa_cli', 'terminate']);
-        this.su(['svc', 'wifi', 'disable']);
-      }
-
-      // Take all other interfaces down.
-      netcfg.forEach(function(ifc2) {
-        if (ifc2.isUp && 'lo' !== ifc2.name && ifname !== ifc2.name) {
-          this.su(['ifconfig', ifc2.name, 'down']);
-        }
-      }.bind(this));
-
-      // Set MAC address.
-      this.su(['ifconfig', ifname, 'down']);
-      this.su(['netcfg', ifname, 'hwaddr', this.computeMacForRndis_()]);
-      this.su(['ifconfig', ifname, 'up']);
-
-      // Enable DHCP -- this will timeout after 10s.
-      this.su(['netcfg', ifname, 'dhcp']).addErrback(function(e) {
-        throw new Error('Offline or no DHCP offer: ' + e.message);
-      });
-
-      // Configure DNS.
-      this.shell(['getprop', 'net.' + ifname + '.dns1']).then(function(s1) {
-        this.shell(['getprop', 'net.' + ifname + '.dns2']).then(function(s2) {
-          var ips = [s1.trim(), s2.trim()].filter(
-              /./.test.bind(/^\d+(\.\d+)+$/));
-          this.su(['ndc', 'resolver', 'setifdns', ifname].concat(ips));
+        // Enable USB tethering
+        this.shell(['getprop', 'sys.usb.config']).then(function(stdout) {
+          if ('rndis,adb' !== stdout.trim()) {
+            this.su(['setprop', 'sys.usb.config', 'rndis,adb']);
+            this.adb(['wait-for-device']);
+          }
         }.bind(this));
+
+        // The entry point to enable USB tethering varies by OS version
+        var tetherFunction = '34';
+        if (osVersion >= 6.0) {
+          if (kernel == 'android-samsung')
+            tetherFunction = '41';
+          else
+            tetherFunction = '30';
+        } else if (osVersion >= 5.1) {
+          tetherFunction = '31';
+        } else if (osVersion >= 5.0) {
+          tetherFunction = '30';
+        } else if (osVersion >= 4.4) {
+          tetherFunction = '34';
+        } else if (osVersion >= 4.1) {
+          tetherFunction = '33';
+        } else if (osVersion >= 4.0) {
+          tetherFunction = '32';
+        }
+        this.su(['service', 'call', 'connectivity', tetherFunction, 'i32', '1']).then(function(stdout) {
+          // Wait for device to come back online (<1s).
+          this.adb(['wait-for-device']);
+        }.bind(this));
+
+        this.scheduleGetNetworkConfiguration().then(function(netcfg) {
+          var ifc = this.getRndisIfc_(netcfg, true);
+          if (!ifc) {
+            throw new Error('netcfg lacks rndis interface');
+          }
+          var ifname = ifc.name;
+
+          // Stop WiFi if enabled.
+          var hasWifi = netcfg.some(function(ifc2) {
+            return ifc2.isUp && (/^wlan\d+$/).test(ifc2.name);
+          });
+          if (hasWifi) {
+            this.su(['svc', 'wifi', 'disable']);
+          }
+
+          // Take all other interfaces down.
+          netcfg.forEach(function(ifc2) {
+            if (ifc2.isUp && 'lo' !== ifc2.name && ifname !== ifc2.name) {
+              this.su(['ip', 'link', 'set', ifc2.name, 'down']);
+            }
+          }.bind(this));
+
+          // Set ip address.
+          this.su(['ip', 'link', 'set', ifname, 'down']);
+          this.su(['ip', 'addr', 'flush', 'dev', ifname]);
+          this.su(['ip', 'addr', 'add', ip, 'dev', ifname]);
+          this.su(['ip', 'link', 'set', ifname, 'up']);
+
+          // set up default route
+          this.su(['route', 'add', '-net', '0.0.0.0', 'netmask', '0.0.0.0', 'gw', gateway, 'dev', ifname]);
+          this.su(['setprop', 'net.' + ifname + '.gw', gateway]);
+
+          // Configure DNS.
+          this.su(['setprop', 'net.dns1', dns1]);
+          this.su(['setprop', 'net.dns2', dns2]);
+          this.su(['setprop', 'net.' + ifname + '.dns1', dns1]);
+          this.su(['setprop', 'net.' + ifname + '.dns2', dns2]);
+          this.su(['ndc', 'resolver', 'setifdns', ifname, dns1, dns2]);
+          this.su(['ndc', 'resolver', 'setdefaultif', ifname]);
+        }.bind(this));
+
+        // Sanity check -- sometimes the above 'up' and/or 'dhcp' commands randomly
+        // fail.  We'll let our caller retry if desired.
+        this.scheduleAssertRndisIsEnabled();
       }.bind(this));
-      this.su(['ndc', 'resolver', 'setdefaultif', ifname]);
     }.bind(this));
-
-    // Sanity check -- sometimes the above 'up' and/or 'dhcp' commands randomly
-    // fail.  We'll let our caller retry if desired.
-    this.scheduleAssertRndisIsEnabled();
   }.bind(this));
-};
-
-/**
- * Disables Reverse USB Tethering via RNDIS.
- */
-Adb.prototype.scheduleDisableRndis = function() {
-  'use strict';
-  this.su(['setprop', 'sys.usb.config', 'adb']);
 };
 
 /**

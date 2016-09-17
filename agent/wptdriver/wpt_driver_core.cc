@@ -137,6 +137,10 @@ void WptDriverCore::Stop(void) {
 -----------------------------------------------------------------------------*/
 bool WptDriverCore::Startup() {
   bool ok = false;
+
+  // Clear out any old test config if it is present
+  PostTest();
+
   do {
     ok = _settings.Load();
     if (!ok) {
@@ -169,16 +173,16 @@ void WptDriverCore::WorkThread(void) {
 
     WaitForSingleObject(_testing_mutex, INFINITE);
     Init();  // do initialization and machine configuration
+    _status.Set(_T("Checking for software updates..."));
+    _installing = true;
+    _settings.UpdateSoftware();
+    _installing = false;
     ReleaseMutex(_testing_mutex);
 
     _status.Set(_T("Running..."));
   }
   while (!_exit && !NeedsReboot()) {
     WaitForSingleObject(_testing_mutex, INFINITE);
-    _status.Set(_T("Checking for software updates..."));
-    _installing = true;
-    _settings.UpdateSoftware();
-    _installing = false;
     _status.Set(_T("Checking for work..."));
     WptTestDriver test(_settings._timeout * SECONDS_TO_MS, has_gpu_);
     if (_webpagetest.GetTest(test)) {
@@ -191,7 +195,7 @@ void WptDriverCore::WorkThread(void) {
         if (profiles_dir.GetLength())
           DeleteDirectory(profiles_dir, false);
         WebBrowser browser(_settings, test, _status, _settings._browser, 
-                           _ipfw);
+                           _ipfw, _webpagetest.WptVersion());
         if (SetupWebPageReplay(test, browser) &&
             !TracerouteTest(test)) {
           test._index = test._specific_index ? test._specific_index : 1;
@@ -208,7 +212,7 @@ void WptDriverCore::WorkThread(void) {
               } else {
                 CStringA first_run_error = test._run_error;
                 if (!first_run_error.GetLength()) {
-                  int result = GetTestResult();
+                  int result = g_shared->TestResult();
                   if (result != 0 && result != 99999)
                     first_run_error.Format(
                         "Test run failed with result code %d", result);
@@ -243,7 +247,13 @@ void WptDriverCore::WorkThread(void) {
       PostTest();
       ReleaseMutex(_testing_mutex);
     } else {
+      // Launch and exit any browsers that need their state cleared
       ReleaseMutex(_testing_mutex);
+      ResetBrowsers();
+      _status.Set(_T("Checking for software updates..."));
+      _installing = true;
+      _settings.UpdateSoftware();
+      _installing = false;
       _status.Set(_T("Waiting for work..."));
       int delay = _settings._polling_delay * SECONDS_TO_MS;
       while (!_exit && delay > 0) {
@@ -252,7 +262,28 @@ void WptDriverCore::WorkThread(void) {
       }
     }
   }
+  ResetBrowsers();
   Cleanup();
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void WptDriverCore::ResetBrowsers() {
+  if (!reset_browsers.IsEmpty()) {
+    WaitForSingleObject(_testing_mutex, INFINITE);
+    while (!reset_browsers.IsEmpty()) {
+      CString exe = reset_browsers.RemoveHead();
+      HANDLE process = NULL;
+      LaunchProcess(exe, &process);
+      if (process) {
+        WaitForInputIdle(process, 10000);
+        CloseHandle(process);
+      }
+      Sleep(5000);
+      KillBrowsers();
+    }
+    ReleaseMutex(_testing_mutex);
+  }
 }
 
 /*-----------------------------------------------------------------------------
@@ -287,28 +318,41 @@ bool WptDriverCore::BrowserTest(WptTestDriver& test, WebBrowser &browser) {
   WptTrace(loglevel::kFunction,_T("[wptdriver] WptDriverCore::BrowserTest\n"));
 
   test._run_error.Empty();
-  ResetTestResult();
+  g_shared->ResetTestResult();
   test.SetFileBase();
   if (test._clear_cache) {
     FlushDNS();
     browser.ClearUserData();
   }
-  if (test._tcpdump)
-    _winpcap.StartCapture( test._file_base + _T(".cap") );
 
   SetCursorPos(0,0);
   ShowCursor(FALSE);
   ret = browser.RunAndWait();
   ShowCursor(TRUE);
 
-  if (test._tcpdump)
-    _winpcap.StopCapture();
+  // See if we need to add the browser exe to the list of browsers
+  // we need to launch and kill.
+  if (!browser._browser_needs_reset.IsEmpty()) {
+    bool found = false;
+    if (!reset_browsers.IsEmpty()) {
+      POSITION pos = reset_browsers.GetHeadPosition();
+      while (pos) {
+        CString exe = reset_browsers.GetNext(pos);
+        if (exe == browser._browser_needs_reset) {
+          found = true;
+          break;
+        }
+      }
+    }
+    if (!found)
+      reset_browsers.AddTail(browser._browser_needs_reset);
+  }
 
   _webpagetest.UploadIncrementalResults(test);
   KillBrowsers();
 
   if (ret) {
-    int result = GetTestResult();
+    int result = g_shared->TestResult();
     if (result != 0 && result != 99999)
       ret = false;
   }
@@ -391,9 +435,25 @@ void WptDriverCore::Init(void){
 		RegCloseKey(hKey);
 	}
 
+	// Disable OS Upgrade in Windows Update
+	if (SUCCEEDED(RegCreateKeyEx(HKEY_LOCAL_MACHINE,
+		_T("SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate"), 0, 0, 0,
+		KEY_READ | KEY_WRITE, NULL, &hKey, NULL))) {
+		DWORD val = 1;
+		RegSetValueEx(hKey, _T("DisableOSUpgrade"), 0, REG_DWORD,
+			(LPBYTE)&val, sizeof(val));
+		RegCloseKey(hKey);
+	}
 
-  // Get WinPCap ready (install it if necessary)
-  _winpcap.Initialize();
+	// Disable Windows 10 upgrade nag dialog
+	if (SUCCEEDED(RegCreateKeyEx(HKEY_LOCAL_MACHINE,
+		_T("SOFTWARE\\Policies\\Microsoft\\Windows\\GWX"), 0, 0, 0,
+		KEY_READ | KEY_WRITE, NULL, &hKey, NULL))) {
+		DWORD val = 1;
+		RegSetValueEx(hKey, _T("DisableGWX"), 0, REG_DWORD,
+			(LPBYTE)&val, sizeof(val));
+		RegCloseKey(hKey);
+	}
 
   KillBrowsers();
 
@@ -417,6 +477,7 @@ void WptDriverCore::Init(void){
   Do our cleanup on exit
 -----------------------------------------------------------------------------*/
 void WptDriverCore::Cleanup(void){
+  PostTest();
   if (housekeeping_timer_) {
     DeleteTimerQueueTimer(NULL, housekeeping_timer_, NULL);
     housekeeping_timer_ = NULL;
@@ -818,64 +879,20 @@ void WptDriverCore::PreTest() {
     if (process)
       CloseHandle(process);
   }
-
-  // Install a global appinit hook for wpthook (actual loading will be
-  // controlled by a shared memory state)
-  TCHAR path[MAX_PATH];
-  if (GetModuleFileName(NULL, path, _countof(path))) {
-    lstrcpy(PathFindFileName(path), _T("wptload.dll"));
-    TCHAR short_path[MAX_PATH];
-    if (GetShortPathName(path, short_path, _countof(short_path))) {
-      HKEY hKey;
-		  if (RegCreateKeyEx(HKEY_LOCAL_MACHINE,
-                         _T("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion")
-                         _T("\\Windows"),
-                         0, 0, 0, KEY_WRITE, 0, &hKey, 0) == ERROR_SUCCESS ) {
-			  DWORD val = 1;
-			  RegSetValueEx(hKey, _T("LoadAppInit_DLLs"), 0, REG_DWORD,
-                      (const LPBYTE)&val, sizeof(val));
-			  val = 0;
-			  RegSetValueEx(hKey, _T("RequireSignedAppInit_DLLs"), 0, REG_DWORD,
-                      (const LPBYTE)&val, sizeof(val));
-        LPTSTR dlls = GetAppInitString(short_path);
-        if (dlls) {
-			    RegSetValueEx(hKey, _T("AppInit_DLLs"), 0, REG_SZ,
-                        (const LPBYTE)dlls,
-                        (lstrlen(dlls) + 1) * sizeof(TCHAR));
-          free(dlls);
-        }
-        RegCloseKey(hKey);
-      }
-    }
-  }
-
 }
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void WptDriverCore::PostTest() {
-  // Remove the AppInit dll
-  HKEY hKey;
-	if (RegCreateKeyEx(HKEY_LOCAL_MACHINE,
-                      _T("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion")
-                      _T("\\Windows"),
-                      0, 0, 0, KEY_WRITE, 0, &hKey, 0) == ERROR_SUCCESS ) {
-    LPTSTR dlls = GetAppInitString(NULL);
-    if (dlls) {
-			RegSetValueEx(hKey, _T("AppInit_DLLs"), 0, REG_SZ,
-                    (const LPBYTE)dlls,
-                    (lstrlen(dlls) + 1) * sizeof(TCHAR));
-      free(dlls);
-    }
-    RegCloseKey(hKey);
-  }
+  ClearAppInitHooks();
 }
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
-LPTSTR WptDriverCore::GetAppInitString(LPCTSTR new_dll) {
+LPTSTR WptDriverCore::GetAppInitString(LPCTSTR new_dll, bool is64bit) {
   LPTSTR dlls = NULL;
   DWORD len = 0;
+  DWORD flags = is64bit ? KEY_WOW64_64KEY : 0;
 
   // get the existing appinit list
   HKEY hKey;
@@ -902,13 +919,15 @@ LPTSTR WptDriverCore::GetAppInitString(LPCTSTR new_dll) {
     memset(dlls, 0, len);
   }
 
-  // remove any occurences of wptload.dll from the list
+  // remove any occurences of wptload.dll, wptld64.dll and wptld64.dll from the list
   if (dlls && lstrlen(dlls)) {
     LPTSTR new_list = (LPTSTR)malloc(len);
     memset(new_list, 0, len);
     LPTSTR dll = _tcstok(dlls, _T(" ,"));
     while (dll) {
-      if (lstrcmpi(PathFindFileName(dll), _T("wptload.dll"))) {
+      if (lstrcmpi(PathFindFileName(dll), _T("wptload.dll")) &&
+          lstrcmpi(PathFindFileName(dll), _T("wptld64.dll")) &&
+          lstrcmpi(PathFindFileName(dll), _T("wptldr64.dll"))) {
         if (lstrlen(new_list))
           lstrcat(new_list, _T(","));
         lstrcat(new_list, dll);

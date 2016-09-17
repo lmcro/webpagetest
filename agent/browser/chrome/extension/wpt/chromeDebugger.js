@@ -265,13 +265,20 @@ wpt.chromeDebugger.OnMessage = function(tabId, message, params) {
     tracing = true;
     if (params['value'] !== undefined) {
       // Collect the netlog events separately for calculating the request timings
+      var jsonStr = '';
       var len = params['value'].length;
+      var first = true;
       for(var i = 0; i < len; i++) {
         if (params['value'][i]['cat'] == 'blink.user_timing')
           g_instance.userTiming.push(params['value'][i]);
+        if (!first)
+          jsonStr += ",\n";
+        jsonStr += JSON.stringify(params['value'][i]);
+        first = false;
       }
-      if (g_instance.trace || g_instance.timeline)
-        wpt.chromeDebugger.sendEvent('trace', JSON.stringify(params['value']));
+      if (g_instance.trace || g_instance.timeline) {
+        wpt.chromeDebugger.sendEvent('trace', jsonStr);
+      }
     }
   }
   if (message === 'Tracing.tracingComplete') {
@@ -763,7 +770,16 @@ wpt.chromeDebugger.SendInitiator = function(requestId, url, initiator_json) {
     detail += "initiatorLineNumber=" + initiator.lineNumber + '\n';
   if (initiator['type'])
     detail += "initiatorType=" + initiator.type + '\n';
-  if (initiator['stackTrace'] && initiator.stackTrace[0]) {
+  if (initiator['stack'] && initiator.stack['callFrames'] && initiator.stack.callFrames[0]) {
+    if (initiator.stack.callFrames[0]['url'])
+      detail += 'initiatorUrl=' + initiator.stack.callFrames[0].url + '\n';
+    if (initiator.stack.callFrames[0]['lineNumber'] !== undefined)
+      detail += 'initiatorLineNumber=' + initiator.stack.callFrames[0].lineNumber + '\n';
+    if (initiator.stack.callFrames[0]['columnNumber'] !== undefined)
+      detail += 'initiatorColumnNumber=' + initiator.stack.callFrames[0].columnNumber + '\n';
+    if (initiator.stack.callFrames[0]['functionName'])
+      detail += 'initiatorFunctionName=' + initiator.stack.callFrames[0].functionName + '\n';
+  } else if (initiator['stackTrace'] && initiator.stackTrace[0]) {
     if (initiator.stackTrace[0]['url'])
       detail += 'initiatorUrl=' + initiator.stackTrace[0].url + '\n';
     if (initiator.stackTrace[0]['lineNumber'] !== undefined)

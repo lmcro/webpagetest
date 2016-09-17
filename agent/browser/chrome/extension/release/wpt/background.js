@@ -13601,27 +13601,6 @@ goog.provide('wpt.commands');
 wpt.commands.g_domElements = [];
 
 /**
- * Chrome APIs move from experimental to supported without notice.
- * Keep our code from breaking by declaring that some experimental
- * APIs can be used in the non-experimental namespace.
- * @param {string} apiName The name of the chrome extensons API.
- */
-function moveOutOfexperimentalIfNeeded(apiName) {
-  // Prefer the real API.  If it exists, do nothing.
-  if (!chrome[apiName]) {
-    // Use the experimental version if it exists.
-    if (chrome.experimental[apiName]) {
-      chrome[apiName] = chrome.experimental[apiName];
-    } else {
-      throw 'Requested chrome API ' + apiName + ' does not exist!';
-    }
-  }
-}
-
-moveOutOfexperimentalIfNeeded('webNavigation');
-moveOutOfexperimentalIfNeeded('webRequest');
-
-/**
  * Remove leading and trailing whitespace.
  * @param {string} stringToTrim
  * @return {string}
@@ -14152,13 +14131,20 @@ wpt.chromeDebugger.OnMessage = function(tabId, message, params) {
     tracing = true;
     if (params['value'] !== undefined) {
       // Collect the netlog events separately for calculating the request timings
+      var jsonStr = '';
       var len = params['value'].length;
+      var first = true;
       for(var i = 0; i < len; i++) {
         if (params['value'][i]['cat'] == 'blink.user_timing')
           g_instance.userTiming.push(params['value'][i]);
+        if (!first)
+          jsonStr += ",\n";
+        jsonStr += JSON.stringify(params['value'][i]);
+        first = false;
       }
-      if (g_instance.trace || g_instance.timeline)
-        wpt.chromeDebugger.sendEvent('trace', JSON.stringify(params['value']));
+      if (g_instance.trace || g_instance.timeline) {
+        wpt.chromeDebugger.sendEvent('trace', jsonStr);
+      }
     }
   }
   if (message === 'Tracing.tracingComplete') {
@@ -14650,7 +14636,16 @@ wpt.chromeDebugger.SendInitiator = function(requestId, url, initiator_json) {
     detail += "initiatorLineNumber=" + initiator.lineNumber + '\n';
   if (initiator['type'])
     detail += "initiatorType=" + initiator.type + '\n';
-  if (initiator['stackTrace'] && initiator.stackTrace[0]) {
+  if (initiator['stack'] && initiator.stack['callFrames'] && initiator.stack.callFrames[0]) {
+    if (initiator.stack.callFrames[0]['url'])
+      detail += 'initiatorUrl=' + initiator.stack.callFrames[0].url + '\n';
+    if (initiator.stack.callFrames[0]['lineNumber'] !== undefined)
+      detail += 'initiatorLineNumber=' + initiator.stack.callFrames[0].lineNumber + '\n';
+    if (initiator.stack.callFrames[0]['columnNumber'] !== undefined)
+      detail += 'initiatorColumnNumber=' + initiator.stack.callFrames[0].columnNumber + '\n';
+    if (initiator.stack.callFrames[0]['functionName'])
+      detail += 'initiatorFunctionName=' + initiator.stack.callFrames[0].functionName + '\n';
+  } else if (initiator['stackTrace'] && initiator.stackTrace[0]) {
     if (initiator.stackTrace[0]['url'])
       detail += 'initiatorUrl=' + initiator.stackTrace[0].url + '\n';
     if (initiator.stackTrace[0]['lineNumber'] !== undefined)
@@ -14779,6 +14774,7 @@ var g_overrideHosts = {};
 var g_addHeaders = [];
 var g_setHeaders = [];
 var g_manipulatingHeaders = false;
+var g_hasCustomCommandLine = false;
 var g_started = false;
 var g_requestsHooked = false;
 
@@ -14988,7 +14984,7 @@ var wptBeforeSendHeaders = function(details) {
       }
       
       // modify headers for HTTPS requests (non-encrypted will be handled at the network layer)
-      if (scheme.toLowerCase() == "https://") {
+      if (g_hasCustomCommandLine || scheme.toLowerCase() == "https://") {
         var i;
         for (i = 0; i < g_setHeaders.length; i++) {
           if (wptHostMatches(host, g_setHeaders[i].filter)) {
@@ -15075,12 +15071,13 @@ chrome.webRequest.onCompleted.addListener(function(details) {
 function wptHookRequests() {
   if (!g_requestsHooked) {
     g_requestsHooked = true;
+    var urlHooks = g_hasCustomCommandLine ? ["<all_urls>"] : ['https://*/*'];
     chrome.webRequest.onBeforeSendHeaders.addListener(wptBeforeSendHeaders,
-      {urls: ['https://*/*']},
+      {urls: urlHooks},
       ['blocking', 'requestHeaders']
     );
     chrome.webRequest.onBeforeRequest.addListener(wptBeforeSendRequest,
-      {urls: ['https://*/*']},
+      {urls: urlHooks},
       ['blocking']
     );
   }
@@ -15237,6 +15234,9 @@ function wptExecuteTask(task) {
     case 'checkresponsive':
       g_processing_task = true;
       g_commandRunner.doCheckResponsive(wptTaskCallback);
+      break;
+    case 'hascustomcommandline':
+      g_hasCustomCommandLine = true;
       break;
 
     default:

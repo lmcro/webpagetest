@@ -4,6 +4,7 @@
 #include "track_sockets.h"
 #include "hook_wininet.h"
 #include "../wptdriver/wpt_test.h"
+#include "MinHook.h"
 
 static WinInetHook* g_hook = NULL;
 
@@ -140,8 +141,7 @@ BOOL __stdcall HttpAddRequestHeadersA_Hook(HINTERNET hRequest,
 -----------------------------------------------------------------------------*/
 WinInetHook::WinInetHook(TrackSockets& sockets, TestState& test_state, 
   WptTest& test):
-  _hook(NULL)
-  ,_sockets(sockets)
+  _sockets(sockets)
   ,_test_state(test_state)
   ,_test(test)
   ,_hook_OpenA(true) {
@@ -155,51 +155,37 @@ WinInetHook::WinInetHook(TrackSockets& sockets, TestState& test_state,
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 WinInetHook::~WinInetHook(void) {
-  if (g_hook == this) {
+ if (g_hook == this)
     g_hook = NULL;
-  }
-  if (_hook)
-    delete _hook;  // remove all the hooks
   DeleteCriticalSection(&cs);
 }
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void WinInetHook::Init() {
-  if (_hook || g_hook)
+  if (g_hook)
     return;
-  _hook = new NCodeHookIA32();
   g_hook = this;
+
   WptTrace(loglevel::kProcess, _T("[wpthook] WinInetHook::Init()\n"));
 
-  _InternetConnectW = _hook->createHookByName("wininet.dll", 
-                  "InternetConnectW", InternetConnectW_Hook);
-  _InternetConnectA = _hook->createHookByName("wininet.dll", 
-                  "InternetConnectA", InternetConnectA_Hook);
-  _HttpOpenRequestA = _hook->createHookByName("wininet.dll", 
-                  "HttpOpenRequestA", HttpOpenRequestA_Hook);
-  _HttpOpenRequestW = _hook->createHookByName("wininet.dll", 
-                  "HttpOpenRequestW", HttpOpenRequestW_Hook);
-  _InternetOpenW = _hook->createHookByName("wininet.dll", "InternetOpenW", 
-                    InternetOpenW_Hook);
-  _InternetOpenA = _hook->createHookByName("wininet.dll", "InternetOpenA", 
-                    InternetOpenA_Hook);
-  _InternetCloseHandle = _hook->createHookByName("wininet.dll", 
-                  "InternetCloseHandle", InternetCloseHandle_Hook);
-  _InternetSetStatusCallback = _hook->createHookByName("wininet.dll", 
-                  "InternetSetStatusCallback", InternetSetStatusCallback_Hook);
-  _HttpSendRequestW = _hook->createHookByName("wininet.dll", 
-                  "HttpSendRequestW", HttpSendRequestW_Hook);
-  _HttpSendRequestA = _hook->createHookByName("wininet.dll", 
-                  "HttpSendRequestA", HttpSendRequestA_Hook);
-  _FtpOpenFileW = _hook->createHookByName("wininet.dll", 
-                  "FtpOpenFileW", FtpOpenFileW_Hook);
-  _FtpOpenFileA = _hook->createHookByName("wininet.dll", 
-                  "FtpOpenFileA", FtpOpenFileA_Hook);
-  _HttpAddRequestHeadersW = _hook->createHookByName("wininet.dll", 
-                  "HttpAddRequestHeadersW", HttpAddRequestHeadersW_Hook);
-  _HttpAddRequestHeadersA = _hook->createHookByName("wininet.dll", 
-                  "HttpAddRequestHeadersA", HttpAddRequestHeadersA_Hook);
+  LoadLibrary(_T("wininet.dll"));
+  MH_CreateHookApi(L"wininet.dll", "InternetConnectW", InternetConnectW_Hook, (LPVOID *)&_InternetConnectW);
+  MH_CreateHookApi(L"wininet.dll", "InternetConnectA", InternetConnectA_Hook, (LPVOID *)&_InternetConnectA);
+  MH_CreateHookApi(L"wininet.dll", "HttpOpenRequestA", HttpOpenRequestA_Hook, (LPVOID *)&_HttpOpenRequestA);
+  MH_CreateHookApi(L"wininet.dll", "HttpOpenRequestW", HttpOpenRequestW_Hook, (LPVOID *)&_HttpOpenRequestW);
+  MH_CreateHookApi(L"wininet.dll", "InternetOpenW", InternetOpenW_Hook, (LPVOID *)&_InternetOpenW);
+  MH_CreateHookApi(L"wininet.dll", "InternetOpenA", InternetOpenA_Hook, (LPVOID *)&_InternetOpenA);
+  MH_CreateHookApi(L"wininet.dll", "InternetCloseHandle", InternetCloseHandle_Hook, (LPVOID *)&_InternetCloseHandle);
+  MH_CreateHookApi(L"wininet.dll", "InternetSetStatusCallback", InternetSetStatusCallback_Hook, (LPVOID *)&_InternetSetStatusCallback);
+  MH_CreateHookApi(L"wininet.dll", "HttpSendRequestW", HttpSendRequestW_Hook, (LPVOID *)&_HttpSendRequestW);
+  MH_CreateHookApi(L"wininet.dll", "HttpSendRequestA", HttpSendRequestA_Hook, (LPVOID *)&_HttpSendRequestA);
+  MH_CreateHookApi(L"wininet.dll", "FtpOpenFileW", FtpOpenFileW_Hook, (LPVOID *)&_FtpOpenFileW);
+  MH_CreateHookApi(L"wininet.dll", "FtpOpenFileA", FtpOpenFileA_Hook, (LPVOID *)&_FtpOpenFileA);
+  MH_CreateHookApi(L"wininet.dll", "HttpAddRequestHeadersW", HttpAddRequestHeadersW_Hook, (LPVOID *)&_HttpAddRequestHeadersW);
+  MH_CreateHookApi(L"wininet.dll", "HttpAddRequestHeadersA", HttpAddRequestHeadersA_Hook, (LPVOID *)&_HttpAddRequestHeadersA);
+
+  MH_EnableHook(MH_ALL_HOOKS);
 }
 
 /*-----------------------------------------------------------------------------
@@ -211,6 +197,13 @@ HINTERNET WinInetHook::InternetOpenW(LPCWSTR lpszAgent, DWORD dwAccessType,
   ATLTRACE(_T("WinInetHook::InternetOpenW"));
 
   CString agent(lpszAgent);
+  if (agent.Find(_T("WebPagetest")) == -1) {
+    if (agent.Find(CA2T(" " + _test._user_agent_modifier + "/")) == -1) {
+      CStringA append = _test.GetAppendUA();
+      if (append.GetLength())
+        agent += CA2T(" " + append);
+    }
+  }
   if( _InternetOpenW )
     ret = _InternetOpenW((LPCWSTR)CT2W(agent), dwAccessType, lpszProxy, 
                           lpszProxyBypass, dwFlags);
@@ -227,6 +220,13 @@ HINTERNET WinInetHook::InternetOpenA(LPCSTR lpszAgent, DWORD dwAccessType,
   ATLTRACE(_T("WinInetHook::InternetOpenA"));
 
   CString agent((LPCTSTR)CA2T(lpszAgent, CP_UTF8));
+  if (agent.Find(_T("WebPagetest")) == -1) {
+    if (agent.Find(CA2T(" " + _test._user_agent_modifier + "/")) == -1) {
+      CStringA append = _test.GetAppendUA();
+      if (append.GetLength())
+        agent += CA2T(" " + append);
+    }
+  }
   if( _InternetOpenA )
     ret = _InternetOpenA((LPCSTR)CT2A(agent), dwAccessType, lpszProxy, 
                           lpszProxyBypass, dwFlags);
@@ -589,11 +589,27 @@ BOOL WinInetHook::HttpAddRequestHeadersW(HINTERNET hRequest,
   LPCWSTR lpszHeaders, DWORD dwHeadersLength, DWORD dwModifiers) {
   BOOL ret = FALSE;
 
-  ATLTRACE(_T("WinInetHook::HttpAddRequestHeadersW"));
+  ATLTRACE(_T("WinInetHook::HttpAddRequestHeadersW: %s"), lpszHeaders);
 
-  CString headers = CW2CT(lpszHeaders);
+  CStringA headers = CT2A(lpszHeaders);
+  EnterCriticalSection(&cs);
+  bool secure = false;
+  _https_requests.Lookup(hRequest, secure);
+  LeaveCriticalSection(&cs);
+  if (secure) {
+    CStringA out_headers("");
+    int pos = 0;
+    while (pos >= 0) {
+      CStringA header = headers.Tokenize("\n", pos).Trim();
+      _test.ModifyRequestHeader(header);
+      if (header.GetLength())
+        out_headers += header + "\r\n";
+    }
+    headers = out_headers;
+    ATLTRACE(_T("WinInetHook::HttpAddRequestHeadersW (new): %s"), CA2T((LPCSTR)headers));
+  }
   if( _HttpAddRequestHeadersW )
-    ret = _HttpAddRequestHeadersW(hRequest, CT2CW(headers), 
+    ret = _HttpAddRequestHeadersW(hRequest, CA2T((LPCSTR)headers), 
             headers.GetLength(), dwModifiers);
 
   return ret;
@@ -605,11 +621,27 @@ BOOL WinInetHook::HttpAddRequestHeadersA(HINTERNET hRequest,
   LPCSTR lpszHeaders, DWORD dwHeadersLength, DWORD dwModifiers) {
   BOOL ret = FALSE;
 
-  ATLTRACE(_T("WinInetHook::HttpAddRequestHeadersA"));
+  ATLTRACE(_T("WinInetHook::HttpAddRequestHeadersA: %S"), lpszHeaders);
 
-  CString headers = CA2CT(lpszHeaders);
+  CStringA headers(lpszHeaders);
+  EnterCriticalSection(&cs);
+  bool secure = false;
+  _https_requests.Lookup(hRequest, secure);
+  LeaveCriticalSection(&cs);
+  if (secure) {
+    CStringA out_headers("");
+    int pos = 0;
+    while (pos >= 0) {
+      CStringA header = headers.Tokenize("\n", pos).Trim();
+      _test.ModifyRequestHeader(header);
+      if (header.GetLength())
+        out_headers += header + "\r\n";
+    }
+    headers = out_headers;
+    ATLTRACE(_T("WinInetHook::HttpAddRequestHeadersA (new): %S"), (LPCSTR)headers);
+  }
   if( _HttpAddRequestHeadersA )
-    ret = _HttpAddRequestHeadersA(hRequest, CT2CA(headers), 
+    ret = _HttpAddRequestHeadersA(hRequest, (LPCSTR)headers, 
             headers.GetLength(), dwModifiers);
 
   return ret;

@@ -30,10 +30,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "StdAfx.h"
 #include "track_sockets.h"
 #include "requests.h"
-#include "test_state.h"
 #include "ssl_stream.h"
 #include "../wptdriver/wpt_test.h"
 #include <nghttp2/nghttp2.h>
+#include "test_state.h"
 
 const DWORD LOCALHOST = 0x0100007F; // 127.0.0.1
 const DWORD LINK_LOCAL_MASK = 0x0000FFFF;
@@ -224,7 +224,7 @@ void TrackSockets::SniffProtocol(SocketInfo* info, DataChunk& chunk) {
       !info->IsLocalhost() &&
       info->_protocol == PROTO_NOT_CHECKED) {
     const char * data = chunk.GetData();
-    DWORD len = chunk.GetLength();
+    size_t len = chunk.GetLength();
     DWORD socket_id = info->_id;
 
     info->_protocol = PROTO_UNKNOWN;
@@ -244,7 +244,7 @@ void TrackSockets::SniffProtocol(SocketInfo* info, DataChunk& chunk) {
           "OPTIONS ", "DELETE ", "TRACE ", "CONNECT ", "PATCH "};
       for (int i = 0; i < _countof(HTTP_METHODS); i++) {
         const char * method = HTTP_METHODS[i];
-        unsigned long method_len = strlen(method);
+        size_t method_len = strlen(method);
         if (len >= method_len && !memcmp(data, method, method_len)) {
           ATLTRACE(_T("[%d] ********* HTTP 1 Connection detected"),
                     socket_id);
@@ -272,7 +272,7 @@ void TrackSockets::SniffProtocol(SocketInfo* info, DataChunk& chunk) {
 bool TrackSockets::ModifyDataOut(SOCKET s, DataChunk& chunk,
                                  bool is_unencrypted) {
   bool is_modified = false;
-  DWORD len = chunk.GetLength();
+  size_t len = chunk.GetLength();
   if (len > 0) {
     EnterCriticalSection(&cs);
     SocketInfo* info = GetSocketInfo(s);
@@ -306,16 +306,16 @@ void TrackSockets::DataOut(SOCKET s, DataChunk& chunk, bool is_unencrypted) {
     if (is_unencrypted)
       SniffProtocol(info, chunk);
     if (_test_state._active && !is_unencrypted) {
-      _test_state._bytes_out += chunk.GetLength();
+      _test_state._bytes_out += (int)chunk.GetLength();
       if (!_test_state._on_load.QuadPart)
-        _test_state._doc_bytes_out += chunk.GetLength();
+        _test_state._doc_bytes_out += (int)chunk.GetLength();
     }
     if (is_unencrypted || !info->_is_ssl) {
       if (info->_protocol == PROTO_H2) {
         size_t len = chunk.GetLength();
         const uint8_t * buff = (const uint8_t *)chunk.GetData();
         if (buff && len && info->_h2_out && info->_h2_out->session) {
-          int r = nghttp2_session_mem_recv(info->_h2_out->session, buff, len);
+          size_t r = nghttp2_session_mem_recv(info->_h2_out->session, buff, len);
           if (r < 0) {
             ATLTRACE("nghttp2_session_mem_recv - DataOut Error %d", r);
           }
@@ -341,19 +341,19 @@ void TrackSockets::DataIn(SOCKET s, DataChunk& chunk, bool is_unencrypted) {
   if (!info->IsLocalhost()) {
     _test_state.ActivityDetected();
     if (_test_state._active && !is_unencrypted) {
-      _test_state._bytes_in_bandwidth += chunk.GetLength();
+      _test_state._bytes_in_bandwidth += (int)chunk.GetLength();
       if (!_test_state.received_data_ && !IsSSLHandshake(chunk))
         _test_state.received_data_ = true;
-      _test_state._bytes_in += chunk.GetLength();
+      _test_state._bytes_in += (int)chunk.GetLength();
       if (!_test_state._on_load.QuadPart)
-        _test_state._doc_bytes_in += chunk.GetLength();
+        _test_state._doc_bytes_in += (int)chunk.GetLength();
     }
     if (is_unencrypted || !info->_is_ssl) {
       if (info->_protocol == PROTO_H2) {
         size_t len = chunk.GetLength();
         const uint8_t * buff = (const uint8_t *)chunk.GetData();
         if (buff && len && info->_h2_in && info->_h2_in->session) {
-          int r = nghttp2_session_mem_recv(info->_h2_in->session, buff, len);
+          size_t r = nghttp2_session_mem_recv(info->_h2_in->session, buff, len);
           if (r < 0) {
             ATLTRACE("nghttp2_session_mem_recv - DataIn Error %d", r);
           }
@@ -597,10 +597,18 @@ bool TrackSockets::SslSocketLookup(void* ssl, SOCKET& s) {
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
+void TrackSockets::SslRemoveSocketLookup(void* ssl) {
+  EnterCriticalSection(&cs);
+  _ssl_sockets.RemoveKey(ssl);
+  LeaveCriticalSection(&cs);
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
 bool TrackSockets::IsSSLHandshake(const DataChunk& chunk) {
   bool is_handshake = false;
   const char *buf = chunk.GetData();
-  DWORD len = chunk.GetLength();
+  size_t len = chunk.GetLength();
   if (len > 3 && buf[0] == 0x16)
     is_handshake = true;
   return is_handshake;
@@ -740,6 +748,14 @@ void TrackSockets::H2Bytes(DATA_DIRECTION direction, DWORD socket_id, int stream
     _requests.BytesOut(socket_id, stream_id, len);
 }
 
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+void TrackSockets::H2Priority(DATA_DIRECTION direction, DWORD socket_id, int stream_id,
+              int depends_on, int weight, int exclusive) {
+  _requests.SetPriority(socket_id, stream_id, depends_on, weight, exclusive);
+}
+
+
 /******************************************************************************
   nghttp2 c-interface callbacks (trampoline back to TrackSockets callbacks)
 *******************************************************************************/
@@ -777,12 +793,29 @@ int h2_on_frame_recv_callback(nghttp2_session *session,
            h2_frame_type(frame->hd.type), frame->hd.stream_id,
            frame->hd.length);
   // Keep track of the bytes-in for headers by looking at the frame
-  if (user_data && frame->hd.type == NGHTTP2_HEADERS) {
-    H2_USER_DATA * u = (H2_USER_DATA *)user_data;
-    if (u->connection) {
-      TrackSockets * c = (TrackSockets *)u->connection;
-      c->H2Bytes(u->direction, u->socket_id, frame->hd.stream_id,
-                 frame->hd.length);
+  if (user_data) {
+    if (frame->hd.type == NGHTTP2_HEADERS) {
+      H2_USER_DATA * u = (H2_USER_DATA *)user_data;
+      if (u->connection) {
+        TrackSockets * c = (TrackSockets *)u->connection;
+        c->H2Bytes(u->direction, u->socket_id, frame->hd.stream_id,
+                   frame->hd.length);
+        if (frame->hd.flags & NGHTTP2_FLAG_PRIORITY) {
+          c->H2Priority(u->direction, u->socket_id, frame->hd.stream_id,
+                        frame->headers.pri_spec.stream_id,
+                        frame->headers.pri_spec.weight,
+                        frame->headers.pri_spec.exclusive);
+        }
+      }
+    } else if (frame->hd.type == NGHTTP2_PRIORITY) {
+      H2_USER_DATA * u = (H2_USER_DATA *)user_data;
+      if (u->connection) {
+        TrackSockets * c = (TrackSockets *)u->connection;
+        c->H2Priority(u->direction, u->socket_id, frame->hd.stream_id,
+                      frame->priority.pri_spec.stream_id,
+                      frame->priority.pri_spec.weight,
+                      frame->priority.pri_spec.exclusive);
+      }
     }
   }
   return 0;

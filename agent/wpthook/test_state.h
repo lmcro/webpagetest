@@ -32,6 +32,7 @@ class Results;
 class ScreenCapture;
 class WptTestHook;
 class Trace;
+#include "WinPCap.h"
 
 const int TEST_RESULT_NO_ERROR = 0;
 const int TEST_RESULT_TIMEOUT = 99997;
@@ -91,6 +92,7 @@ public:
   void OnNavigate();
   void OnNavigateComplete();
   void OnAllDOMElementsLoaded(DWORD load_time);
+  void SetDomLoadingEvent(DWORD domLoading);
   void SetDomInteractiveEvent(DWORD domInteractive);
   void SetDomContentLoadedEvent(DWORD start, DWORD end);
   void SetLoadEvent(DWORD load_event_start, DWORD load_event_end);
@@ -103,7 +105,7 @@ public:
   void Reset(bool cascade = true);
   void Init();
   void TitleSet(CString title);
-  void UpdateBrowserWindow();
+  void UpdateBrowserWindow(DWORD current_width = 0, DWORD current_height = 0);
   DWORD ElapsedMsFromStart(LARGE_INTEGER end) const;
   DWORD ElapsedMsFromLaunch(LARGE_INTEGER end) const;
   void FindBrowserNameAndVersion();
@@ -127,6 +129,7 @@ public:
   LARGE_INTEGER _first_navigate;
   LARGE_INTEGER _dom_elements_time;
   DWORD _dom_interactive;
+  DWORD _dom_loading;
   DWORD _dom_content_loaded_event_start;
   DWORD _dom_content_loaded_event_end;
   LARGE_INTEGER _on_load;
@@ -183,10 +186,15 @@ public:
   CAtlList<StatusMessage>  _status_messages;   // Browser status
   CString                  _custom_metrics;    // JSON-formatted custom metrics data
   CString                  _user_timing;       // JSON-formatted user timing data (from Chrome traces)
+  CString                  _file_base;         // Base path for writing results files
+  int reported_step_;
+  CStringA  current_step_name_;
+  SharedMem shared_;
 
 private:
   bool  _first_request_sent;
   bool  _started;
+  bool  _viewport_adjusted;
   int   _next_document;
   Results&  _results;
   ScreenCapture& _screen_capture;
@@ -197,6 +205,8 @@ private:
   CString process_full_path_;
   CString process_base_exe_;
   CString last_title_;
+  CWinPCap    _winpcap;
+
 
 
   // tracking of the periodic data capture
@@ -224,4 +234,6 @@ private:
   void GetCPUTime(FILETIME &cpu_time, FILETIME &total_time);
   double GetElapsedMilliseconds(FILETIME &start, FILETIME &end);
   void CollectMemoryStats();
+  void UpdateStoredBrowserVersion();
+  void IncrementStep(void);
 };

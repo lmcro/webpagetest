@@ -34,14 +34,14 @@ class BrowserSettings;
 class WebBrowser {
 public:
   WebBrowser(WptSettings& settings, WptTestDriver& test, WptStatus &status, 
-             BrowserSettings& browser, CIpfw &ipfw);
+             BrowserSettings& browser, CIpfw &ipfw, DWORD wpt_ver);
   ~WebBrowser(void);
 
   bool RunAndWait();
   void ClearUserData();
+  CString _browser_needs_reset;
 
 private:
-  void InjectDll();
   bool ConfigureIpfw(WptTestDriver& test);
   void ResetIpfw(void);
   bool FindBrowserChild(DWORD pid, PROCESS_INFORMATION& pi,
@@ -49,6 +49,7 @@ private:
   void ConfigureFirefoxPrefs();
   void ConfigureIESettings();
   void ConfigureChromePreferences();
+  void CreateChromeSymlink();
   HANDLE FindAdditionalHookProcess(HANDLE launched_process, CString exe);
 
   WptSettings&    _settings;
@@ -56,10 +57,11 @@ private:
   WptStatus&      _status;
   BrowserSettings& _browser;
   CIpfw&          _ipfw;
-
+  
   HANDLE        _browser_process;
   HANDLE  _browser_started_event;
   HANDLE  _browser_done_event;
+  DWORD   _wpt_ver;
 
   CRITICAL_SECTION  cs;
   SECURITY_ATTRIBUTES null_dacl;
