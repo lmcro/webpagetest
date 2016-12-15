@@ -10,11 +10,10 @@ require_once __DIR__ . '/include/UrlGenerator.php';
 global $testPath, $id, $run, $cached, $step; // defined in common.inc
 
 $secure = false;
-$haveLocations = false;
 $testInfo = TestInfo::fromFiles($testPath);
 $localPaths = new TestPaths($testPath, $run, $cached, $step);
 $urlGenerator = UrlGenerator::create(false, "", $id, $run, $cached, $step);
-$requests = getRequestsForStep($localPaths, $urlGenerator, $secure, $haveLocations, true);
+$requests = getRequestsForStep($localPaths, $urlGenerator, $secure);
 $page_keywords = array('Images','Webpagetest','Website Speed Test','Page Speed');
 $page_description = "Website speed test images$testLabel.";
 $userImages = true;
@@ -54,7 +53,7 @@ $userImages = true;
             if( array_key_exists('contentType', $request) &&
               !strncasecmp($request['contentType'], 'image/', 6)) {
               $index = $request['index'] + 1;
-              echo "<tr><td><b>$index:</b></td><td>";
+              echo "<tr id=\"image$index\"><td><b>$index:</b></td><td>";
               $reqUrl = "http://";
               if( $request['is_secure'] )
                 $reqUrl = "https://";

@@ -195,12 +195,17 @@ WebDriverServer.prototype.init = function(args) {
   this.traceFileStream_ = undefined;
   this.userTimingFile_ = undefined;
   this.cpuSlicesFile_ = undefined;
+  this.scriptTimingFile_ = undefined;
   this.pcapSlicesFile_ = undefined;
   this.netlogFile_ = undefined;
   this.featureUsageFile_ = undefined;
+  this.interactiveFile_ = undefined;
   this.isNavigating_ = false;
   this.mainFrame_ = undefined;
   this.pageLoadCoalesceTimer_ = undefined;
+  this.activityTime_ = DETECT_ACTIVITY_MS;
+  if (args.task['activityTime'] !== undefined)
+    this.activityTime_ = 1000 * Math.min(Math.max(args.task.activityTime, 0), 30);
   this.tearDown_();
 };
 
@@ -370,10 +375,20 @@ WebDriverServer.prototype.onDevToolsMessage_ = function(message) {
         'Network.' === message.method.substring(0, 8)) {
       logger.debug("Activity detected after onload, waiting for page activity to finish");
       clearTimeout(this.pageLoadCoalesceTimer_);
+      var wait_time = this.activityTime_;
+      if (this.task_['time'] !== undefined && this.testStartTime_ !== undefined) {
+        // Make sure we meet any minimum test duration that was specified
+        var elapsed = (Date.now() - this.testStartTime_) / 1000.0;
+        if (elapsed < this.task_.time) {
+          var remaining = this.task_.time - elapsed;
+          wait_time += (remaining * 1000);
+          logger.debug("Activity before the minimum test duration of " + this.task_.time + " seconds.  Waiting another " + remaining + " seconds.");
+        }
+      }
       this.pageLoadCoalesceTimer_ = setTimeout(function() {
         this.pageLoadCoalesceTimer_ = undefined;
         this.onPageLoad_();
-      }.bind(this), DETECT_ACTIVITY_MS);
+      }.bind(this), wait_time);
     }
     if ('Page.frameStartedLoading' === message.method) {
       if (message.params['frameId'] !== undefined) {
@@ -391,7 +406,16 @@ WebDriverServer.prototype.onDevToolsMessage_ = function(message) {
       }
     } else if ('Page.loadEventFired' === message.method) {
       if (this.isRecordingDevTools_) {
-        var wait_time = this.task_['web10'] == 1 ? DETECT_NO_RE_NAVIGATE_MS : DETECT_ACTIVITY_MS;
+        var wait_time = this.task_['web10'] == 1 ? DETECT_NO_RE_NAVIGATE_MS : this.activityTime_;
+        if (this.task_['time'] !== undefined && this.testStartTime_ !== undefined) {
+          // Make sure we meet any minimum test duration that was specified
+          var elapsed = (Date.now() - this.testStartTime_) / 1000.0;
+          if (elapsed < this.task_.time) {
+            var remaining = this.task_.time - elapsed;
+            wait_time += (remaining * 1000);
+            logger.debug("Page loaded before the minimum test duration of " + this.task_.time + " seconds.  Waiting another " + remaining + " seconds.");
+          }
+        }
         // Allow for up to 1 second after the page load finished for
         // another navigation to start (in the case of a javascript redirect).
         this.pageLoadCoalesceTimer_ = setTimeout(function() {
@@ -928,7 +952,7 @@ WebDriverServer.prototype.scheduleStartTracingIfRequested_ = function() {
     this.traceFileStream_.write('{"traceEvents":[{}');
     var message = {method: 'Tracing.start'};
     message.params = {
-      categories: 'blink.console,disabled-by-default-devtools.timeline,devtools.timeline',
+      categories: 'blink.console,disabled-by-default-devtools.timeline,devtools.timeline,disabled-by-default-blink.feature_usage,blink.user_timing',
       options: 'record-as-much-as-possible'
     };
     if (1 === this.task_.trace) {
@@ -940,7 +964,7 @@ WebDriverServer.prototype.scheduleStartTracingIfRequested_ = function() {
       message.params.categories = '-*,' + message.params.categories;
     }
     if (1 === this.task_.timeline) {
-      message.params.categories = message.params.categories + ',toplevel,disabled-by-default-devtools.timeline.frame,devtools.timeline.frame';
+      message.params.categories = message.params.categories + ',toplevel,v8.execute,disabled-by-default-devtools.timeline.frame,devtools.timeline.frame';
       if (this.task_.timelineStackDepth) {
         message.params.categories = message.params.categories + ',disabled-by-default-devtools.timeline.stack,devtools.timeline.stack';
       }
@@ -1013,10 +1037,13 @@ WebDriverServer.prototype.scheduleProcessTrace_ = function() {
     if (this.traceFile_) {
       this.userTimingFile_ = path.join(this.runTempDir_, 'user_timing.json.gz');
       this.cpuSlicesFile_ = path.join(this.runTempDir_, 'timeline_cpu.json.gz');
+      this.scriptTimingFile_ = path.join(this.runTempDir_, 'script_timing.json.gz');
       this.featureUsageFile_ = path.join(this.runTempDir_, 'feature_usage.json.gz');
+      this.interactiveFile_ = path.join(this.runTempDir_, 'interactive.json.gz');
       var options = ['lib/trace/trace-parser.py', '-vvvv',
           '-t', this.traceFile_, '-u', this.userTimingFile_,
-          '-c', this.cpuSlicesFile_, '-f', this.featureUsageFile_];
+          '-c', this.cpuSlicesFile_, '-j', this.scriptTimingFile_,
+          '-f', this.featureUsageFile_, '-i', this.interactiveFile_];
       process_utils.scheduleExec(this.app_,
           'python', options, undefined,
           TRACE_PROCESSING_TIMEOUT_MS).then(function(stdout) {
@@ -1106,6 +1133,8 @@ WebDriverServer.prototype.runPageLoad_ = function(browserCaps) {
   this.scheduleStartPacketCaptureIfRequested_();
   // No page load timeout here -- agent_main enforces run-level timeout.
   this.app_.schedule('Run page load', function() {
+    this.testStartTime_ = Date.now();
+
     // onDevToolsMessage_ resolves this promise when it detects on-load.
     this.pageLoadDonePromise_ = new webdriver.promise.Deferred();
     if (this.timeout_) {
@@ -1568,6 +1597,21 @@ WebDriverServer.prototype.done_ = function() {
     if (this.devToolsMessages_ && this.devToolsMessages_.length > 0) {
       devToolsFile = path.join(this.runTempDir_, 'devtools.json');
       fs.writeFileSync(devToolsFile, JSON.stringify(this.devToolsMessages_));
+      // run the trace parser against the dev tools file on iOS
+      if (this.traceFile_ == undefined) {
+        this.cpuSlicesFile_ = path.join(this.runTempDir_, 'timeline_cpu.json.gz');
+        this.scriptTimingFile_ = path.join(this.runTempDir_, 'script_timing.json.gz');
+        this.interactiveFile_ = path.join(this.runTempDir_, 'interactive.json.gz');
+        var options = ['lib/trace/trace-parser.py', '-vvvv',
+            '-l', devToolsFile, '-c', this.cpuSlicesFile_,
+            '-j', this.scriptTimingFile_, '-i', this.interactiveFile_];
+        process_utils.scheduleExec(this.app_,
+            'python', options, undefined,
+            TRACE_PROCESSING_TIMEOUT_MS).then(function(stdout) {
+        }.bind(this), function(err) {
+          logger.info('Timeline processing error: ' + err.message);
+        }.bind(this));
+      }
     }
     // Add any browser-specific page data if we have it
     if (this.browser_['osVersion'] !== undefined) {
@@ -1591,8 +1635,10 @@ WebDriverServer.prototype.done_ = function() {
           traceFile: this.traceFile_,
           userTimingFile: this.userTimingFile_,
           cpuSlicesFile: this.cpuSlicesFile_,
+          scriptTimingFile: this.scriptTimingFile_,
           pcapSlicesFile: this.pcapSlicesFile_,
           featureUsageFile: this.featureUsageFile_,
+          interactiveFile: this.interactiveFile_,
           netlogFile: this.netlogFile_,
           videoFile: this.videoFile_,
           videoFrames: this.videoFrames_,

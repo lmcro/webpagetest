@@ -99,13 +99,15 @@
       <AdditionalDependencies>version.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;crypt32.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;wininet.lib;ws2_32.lib;iphlpapi.lib;wtsapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(OutDir)</AdditionalLibraryDirectories>
       <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y *.ini "$(outdir)\"
-mkdir "$(outdir)\templates\Firefox\extensions\wptdriver@webpagetest.org"
-copy /Y "..\browser\firefox\*.*" "$(outdir)\templates\Firefox\"
-xcopy /Y /E /S /I "..\browser\firefox\extension" "$(outdir)\templates\Firefox\extensions\wptdriver@webpagetest.org"
-</Command>
+      <Command>copy /Y *.ini "$(outdir)"
+del /S /Q "$(outdir)templates\Firefox"
+mkdir "$(outdir)templates\Firefox\extensions\wptdriver@webpagetest.org"
+copy /Y "..\browser\firefox\*.*" "$(outdir)templates\Firefox\"
+xcopy /E /R /Y "..\browser\firefox\extension" "$(outdir)templates\Firefox\extensions\wptdriver@webpagetest.org"
+EXIT 0</Command>
     </PostBuildEvent>
     <PostBuildEvent>
       <Message>Copying support files</Message>
@@ -131,13 +133,15 @@ xcopy /Y /E /S /I "..\browser\firefox\extension" "$(outdir)\templates\Firefox\ex
       <AdditionalDependencies>version.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;crypt32.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;wininet.lib;ws2_32.lib;iphlpapi.lib;wtsapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(OutDir)</AdditionalLibraryDirectories>
       <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y *.ini "$(outdir)\"
-mkdir "$(outdir)\templates\Firefox\extensions\wptdriver@webpagetest.org"
-copy /Y "..\browser\firefox\*.*" "$(outdir)\templates\Firefox\"
-xcopy /Y /E /S /I "..\browser\firefox\extension" "$(outdir)\templates\Firefox\extensions\wptdriver@webpagetest.org"
-</Command>
+      <Command>copy /Y *.ini "$(outdir)"
+del /S /Q "$(outdir)templates\Firefox"
+mkdir "$(outdir)templates\Firefox\extensions\wptdriver@webpagetest.org"
+copy /Y "..\browser\firefox\*.*" "$(outdir)templates\Firefox\"
+xcopy /E /R /Y "..\browser\firefox\extension" "$(outdir)templates\Firefox\extensions\wptdriver@webpagetest.org"
+EXIT 0</Command>
     </PostBuildEvent>
     <PostBuildEvent>
       <Message>Copying support files</Message>
@@ -171,11 +175,12 @@ xcopy /Y /E /S /I "..\browser\firefox\extension" "$(outdir)\templates\Firefox\ex
       <ProfileGuidedDatabase>$(IntDir)$(TargetName).pgd</ProfileGuidedDatabase>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y *.ini "$(outdir)\"
-mkdir "$(outdir)\templates\Firefox\extensions\wptdriver@webpagetest.org"
-copy /Y "..\browser\firefox\*.*" "$(outdir)\templates\Firefox\"
-xcopy /Y /E /S /I "..\browser\firefox\extension" "$(outdir)\templates\Firefox\extensions\wptdriver@webpagetest.org"
-</Command>
+      <Command>copy /Y *.ini "$(outdir)"
+del /S /Q "$(outdir)templates\Firefox"
+mkdir "$(outdir)templates\Firefox\extensions\wptdriver@webpagetest.org"
+copy /Y "..\browser\firefox\*.*" "$(outdir)templates\Firefox\"
+xcopy /E /R /Y "..\browser\firefox\extension" "$(outdir)templates\Firefox\extensions\wptdriver@webpagetest.org"
+EXIT 0</Command>
     </PostBuildEvent>
     <PostBuildEvent>
       <Message>Copying support files</Message>
@@ -209,11 +214,12 @@ xcopy /Y /E /S /I "..\browser\firefox\extension" "$(outdir)\templates\Firefox\ex
       <ProfileGuidedDatabase>$(IntDir)$(TargetName).pgd</ProfileGuidedDatabase>
     </Link>
     <PostBuildEvent>
-      <Command>copy /Y *.ini "$(outdir)\"
-mkdir "$(outdir)\templates\Firefox\extensions\wptdriver@webpagetest.org"
-copy /Y "..\browser\firefox\*.*" "$(outdir)\templates\Firefox\"
-xcopy /Y /E /S /I "..\browser\firefox\extension" "$(outdir)\templates\Firefox\extensions\wptdriver@webpagetest.org"
-</Command>
+      <Command>copy /Y *.ini "$(outdir)"
+del /S /Q "$(outdir)templates\Firefox"
+mkdir "$(outdir)templates\Firefox\extensions\wptdriver@webpagetest.org"
+copy /Y "..\browser\firefox\*.*" "$(outdir)templates\Firefox\"
+xcopy /E /R /Y "..\browser\firefox\extension" "$(outdir)templates\Firefox\extensions\wptdriver@webpagetest.org"
+EXIT 0</Command>
     </PostBuildEvent>
     <PostBuildEvent>
       <Message>Copying support files</Message>
@@ -232,6 +238,8 @@ xcopy /Y /E /S /I "..\browser\firefox\extension" "$(outdir)\templates\Firefox\ex
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\wpthook\shared_mem.h" />
+    <ClInclude Include="shaper.h" />
+    <ClInclude Include="shaper\interface.h" />
     <ClInclude Include="software_update.h" />
     <ClInclude Include="ipfw.h" />
     <ClInclude Include="Resource.h" />
@@ -268,6 +276,7 @@ xcopy /Y /E /S /I "..\browser\firefox\extension" "$(outdir)\templates\Firefox\ex
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\wpthook\shared_mem.cc" />
+    <ClCompile Include="shaper.cpp" />
     <ClCompile Include="software_update.cc" />
     <ClCompile Include="ipfw.cc" />
     <ClCompile Include="stdafx.cc">

@@ -269,24 +269,57 @@ bool FindBrowserWindow( DWORD process_id, HWND& frame_window) {
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
-void WptTrace(int level, LPCTSTR format, ...) {
+void WptTrace(const wchar_t* format, ...) {
   #ifdef DEBUG
   va_list args;
-  va_start( args, format );
+  va_start(args, format);
 
-  int len = _vsctprintf( format, args ) + 1;
-  if (len) {
-    TCHAR * msg = (TCHAR *)malloc( len * sizeof(TCHAR) );
+  int len = _vscwprintf(format, args);
+  if (len > 0) {
+    len += 2;
+    int size = len * sizeof(wchar_t);
+    wchar_t * msg = (TCHAR *)malloc(size);
     if (msg) {
-      if (_vstprintf_s( msg, len, format, args ) > 0) {
-        if (lstrlen(msg)) {
-          OutputDebugString(msg);
-        }
+      memset(msg, 0, size);
+      if (vswprintf_s(msg, len, format, args) > 0 && lstrlenW(msg)) {
+        lstrcatW(msg, L"\n");
+        OutputDebugStringW(msg);
       }
 
       free( msg );
     }
   }
+  #endif
+}
+
+void WptTrace(const char* format, ...) {
+  #ifdef DEBUG
+  va_list args;
+  va_start(args, format);
+
+  int len = _vscprintf(format, args);
+  if (len > 0) {
+    len += 2;
+    int size = len * sizeof(char);
+    char * msg = (char *)malloc(size);
+    if (msg) {
+      memset(msg, 0, size);
+      if (vsprintf_s(msg, len, format, args) > 0 && lstrlenA(msg)) {
+        lstrcatA(msg, "\n");
+        OutputDebugStringA(msg);
+      }
+
+      free( msg );
+    }
+  }
+  #endif
+}
+
+void WptTrace(int dwCategory, int line, const wchar_t* format, ...) {
+  #ifdef DEBUG
+  va_list argptr; va_start(argptr, format);
+  WptTrace(format, argptr);
+  va_end(argptr);
   #endif
 }
 
@@ -539,6 +572,20 @@ bool FileExists(CString file) {
   if (GetFileAttributes(file) != INVALID_FILE_ATTRIBUTES)
     ret = true;
   return ret;
+}
+
+/*-----------------------------------------------------------------------------
+  See if the given file exists
+-----------------------------------------------------------------------------*/
+size_t FileSize(CString file) {
+  size_t size = 0;
+  HANDLE file_handle = CreateFile(file, GENERIC_READ, FILE_SHARE_READ, NULL,
+                                  OPEN_EXISTING, 0, 0);
+  if (file_handle != INVALID_HANDLE_VALUE) {
+    size = GetFileSize(file_handle, NULL);
+    CloseHandle(file_handle);
+  }
+  return size;
 }
 
 /*-----------------------------------------------------------------------------
@@ -992,6 +1039,10 @@ bool InstallAppInitHook(LPCTSTR exe) {
   ATLTRACE(_T("InstallAppInitHook - %s"), exe);
   bool installed = false;
 
+  // Set an environment variable flag to let the hook identify the processes
+  // that should be inspected
+  SetEnvironmentVariable(_T("WPT_HOOK"), _T("YES"));
+
   // See if we need the 64-bit version
   DWORD reg_flags = 0;
   LPCTSTR hook_dll = _T("wptload.dll");
@@ -1046,6 +1097,7 @@ bool InstallAppInitHook(LPCTSTR exe) {
 void ClearAppInitHooks() {
   HKEY hKey;
   ATLTRACE(_T("ClearAppInitHooks"));
+  SetEnvironmentVariable(_T("WPT_HOOK"), NULL);
 	if (RegCreateKeyEx(HKEY_LOCAL_MACHINE,
       _T("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows"),
       0, 0, 0, KEY_READ | KEY_WRITE, 0, &hKey, 0) == ERROR_SUCCESS ) {
@@ -1075,4 +1127,27 @@ void ClearAppInitHooks() {
     }
   }
   ATLTRACE(_T("ClearAppInitHooks - Done"));
+}
+
+/*-----------------------------------------------------------------------------
+  Run the given python script and wait for a result (assume C:\Python27)
+-----------------------------------------------------------------------------*/
+bool RunPythonScript(CString script, CString options) {
+  bool ok = false;
+  CString command_line = _T("C:\\Python27\\python.exe");
+  if (FileExists(command_line)) {
+    TCHAR dir[MAX_PATH];
+    if (GetModuleFileName(NULL, dir, _countof(dir))) {
+      *PathFindFileName(dir) = 0;
+      CString script_path = dir;
+      script_path += script;
+      if (FileExists(script_path)) {
+        command_line += _T(" \"") + script_path + _T("\"");
+        if (options.GetLength())
+          command_line += _T(" ") + options;
+        ok = LaunchProcess(command_line);
+      }
+    }
+  }
+  return ok;
 }

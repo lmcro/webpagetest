@@ -193,11 +193,11 @@ function ProcessBenchmark($benchmark) {
             $state['running'] = false;
         }
         
-        if (!$state['running'] && 
-            (array_key_exists('runs', $state) && count($state['runs'])) &&
-            (!array_key_exists('needs_aggregation', $state) || $state['needs_aggregation']) ){
+        if (!$state['running'] && (!array_key_exists('needs_aggregation', $state) || $state['needs_aggregation'])) {
+          if (array_key_exists('runs', $state) && count($state['runs']))
             AggregateResults($benchmark, $state, $options);
-            file_put_contents("./results/benchmarks/$benchmark/state.json", json_encode($state));
+          $state['needs_aggregation'] = false;
+          file_put_contents("./results/benchmarks/$benchmark/state.json", json_encode($state));
         }
         
         // see if we need to kick off a new benchmark run
@@ -271,6 +271,7 @@ function CheckBenchmarkStatus($benchmark, &$state) {
                 // collect the test data and archive the test as we get each result
                 if ($test['completed']) {
                     $updated++;
+                    RestoreTest($test['id']);
                     CollectResults($test, $data);
                     if (ArchiveTest($test['id'])) {
                         logMsg("Test {$test['id']} : Archived", "./log/$logFile", true);
@@ -940,7 +941,7 @@ function ImportS3Benchmarks() {
   $key = GetSetting('archive_s3_key');
   $secret = GetSetting('archive_s3_secret');
   $bucket = GetSetting('archive_s3_bucket');
-  $prefix = GetSetting('s3_benchmarks');
+  $prefix = GetSetting('s3_benchmark_prefix');
   $s3 = new S3($key, $secret, false, $server);
   $s3Benchmarks = is_file("./results/benchmarks/s3.json") ? json_decode(file_get_contents('./results/benchmarks/s3.json'), true) : array();
   if (!isset($s3Benchmarks) || !is_array($s3Benchmarks)) {
@@ -966,6 +967,7 @@ function ImportS3Benchmarks() {
     foreach ($prefixes as $p) {
       $files = $s3->getBucket($bucket, $p);
       foreach ($files as $file => $info) {
+        logMsg("Checking $file", "./log/$logFile", true);
         $name = substr($file, strlen($prefix));
         if (!isset($s3Benchmarks[$name])) {
           $data = $s3->getObject($bucket, $file);
@@ -974,9 +976,17 @@ function ImportS3Benchmarks() {
             if (isset($bminfo) && is_array($bminfo)) {
               if (ImportS3Benchmark($bminfo)) {
                 $s3Benchmarks[$name] = time();
+              } else {
+                logMsg("  Error importing s3 benchmark for $file", "./log/$logFile", true);
               }
+            } else {
+              logMsg("  Error parsing JSON for $file", "./log/$logFile", true);
             }
+          } else {
+            logMsg("  Error fetching $file", "./log/$logFile", true);
           }
+        } else {
+          logMsg("  Already processed $file", "./log/$logFile", true);
         }
       }
     }
@@ -1008,6 +1018,7 @@ function ImportS3Benchmark($info) {
       $state['last_run'] = time();
     }
     $state['tests'] = array();
+    logMsg("  $benchmark import: " . json_encode($info), "./log/$logFile", true);
     
     if (isset($info['tests']) && is_array($info['tests'])) {
       foreach ($info['tests'] as $test) {
@@ -1021,6 +1032,8 @@ function ImportS3Benchmark($info) {
                                     'submitted' => $state['last_run'], 
                                     'completed' => 0);
       }
+    } else {
+      logMsg("  $benchmark import with no tests", "./log/$logFile", true);
     }
 
     if (count($state['tests'])) {
@@ -1028,6 +1041,8 @@ function ImportS3Benchmark($info) {
       $imported = true;
       file_put_contents("./results/benchmarks/$benchmark/state.json", json_encode($state));
     }
+  } else {
+    logMsg("  Benchmark $benchmark is currently busy", "./log/$logFile", true);
   }
   
   return $imported;

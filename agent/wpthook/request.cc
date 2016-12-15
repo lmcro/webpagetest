@@ -473,7 +473,8 @@ Request::Request(TestState& test_state, DWORD socket_id, DWORD stream_id,
   , _h2_priority_depends_on(-1)
   , _h2_priority_weight(-1)
   , _h2_priority_exclusive(-1)
-  , _protocol(protocol) {
+  , _protocol(protocol)
+  , _certificate_bytes(0) {
   QueryPerformanceCounter(&_start);
   _first_byte.QuadPart = 0;
   _end.QuadPart = 0;
@@ -488,9 +489,7 @@ Request::Request(TestState& test_state, DWORD socket_id, DWORD stream_id,
   _is_ssl = _sockets.IsSslById(socket_id);
   InitializeCriticalSection(&cs);
 
-  WptTrace(loglevel::kFunction,
-           _T("[wpthook] - new request on socket %d stream %d\n"), 
-           socket_id, stream_id);
+  ATLTRACE("[wpthook] - new request on socket %d stream %d", socket_id, stream_id);
 }
 
 
@@ -503,12 +502,12 @@ Request::~Request(void) {
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void Request::DataIn(DataChunk& chunk) {
-  WptTrace(loglevel::kFunction, 
-      _T("[wpthook] - Request::DataIn(len=%d)"), chunk.GetLength());
+  ATLTRACE("[wpthook] - Request::DataIn(len=%d)", chunk.GetLength());
 
   EnterCriticalSection(&cs);
   if (_is_active) {
     QueryPerformanceCounter(&_end);
+    _chunk_timings.AddTail(ChunkTiming(chunk.GetLength(), _end));
     if (!_first_byte.QuadPart)
       _first_byte.QuadPart = _end.QuadPart;
     if (!_is_spdy) {
@@ -528,17 +527,14 @@ bool Request::ModifyDataOut(DataChunk& chunk) {
     is_modified = chunk.ModifyDataOut(_test);
   }
   LeaveCriticalSection(&cs);
-  WptTrace(loglevel::kFunction,
-      _T("[wpthook] - Request::ModifyDataOut(len=%d) -> %d"),
-      chunk.GetLength(), is_modified);
+  ATLTRACE("[wpthook] - Request::ModifyDataOut(len=%d) -> %d", chunk.GetLength(), is_modified);
   return is_modified;
 }
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void Request::DataOut(DataChunk& chunk) {
-  WptTrace(loglevel::kFunction,
-      _T("[wpthook] - Request::DataOut(len=%d)"), chunk.GetLength());
+  ATLTRACE("[wpthook] - Request::DataOut(len=%d)", chunk.GetLength());
 
   EnterCriticalSection(&cs);
   if (!_data_sent) {
@@ -563,8 +559,7 @@ void Request::DataOut(DataChunk& chunk) {
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void Request::HeaderIn(const char * header, const char * value, bool pushed) {
-  WptTrace(loglevel::kFunction, 
-      _T("[wpthook] - Request::HeaderIn('%S', '%S')"), header, value);
+  ATLTRACE("[wpthook] - Request::HeaderIn('%s', '%s')", header, value);
 
   EnterCriticalSection(&cs);
   if (_is_active) {
@@ -581,8 +576,7 @@ void Request::HeaderIn(const char * header, const char * value, bool pushed) {
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void Request::ObjectDataIn(DataChunk& chunk) {
-  WptTrace(loglevel::kFunction, 
-      _T("[wpthook] - Request::ObjectDataIn(len=%d)"), chunk.GetLength());
+  ATLTRACE("[wpthook] - Request::ObjectDataIn(len=%d)", chunk.GetLength());
 
   EnterCriticalSection(&cs);
   if (_is_active) {
@@ -597,18 +591,21 @@ void Request::ObjectDataIn(DataChunk& chunk) {
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void Request::BytesIn(size_t len) {
-  WptTrace(loglevel::kFunction, _T("[wpthook] - Request::BytesIn(%d)"), len);
+  ATLTRACE("[wpthook] - Request::BytesIn(%d)", len);
   EnterCriticalSection(&cs);
-  if (_is_active)
+  if (_is_active) {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    _chunk_timings.AddTail(ChunkTiming(len, now));
     _bytes_in += (DWORD)len;
+  }
   LeaveCriticalSection(&cs);
 }
 
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void Request::HeaderOut(const char * header, const char * value, bool pushed) {
-  WptTrace(loglevel::kFunction, 
-      _T("[wpthook] - Request::HeaderOut('%S', '%S')"), header, value);
+  ATLTRACE("[wpthook] - Request::HeaderOut('%s', '%s')", header, value);
 
   EnterCriticalSection(&cs);
   if (!_data_sent) {
@@ -626,8 +623,7 @@ void Request::HeaderOut(const char * header, const char * value, bool pushed) {
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void Request::ObjectDataOut(DataChunk& chunk) {
-  WptTrace(loglevel::kFunction,
-      _T("[wpthook] - Request::ObjectDataOut(len=%d)"), chunk.GetLength());
+  ATLTRACE("[wpthook] - Request::ObjectDataOut(len=%d)", chunk.GetLength());
 
   EnterCriticalSection(&cs);
   if (!_data_sent) {
@@ -643,7 +639,7 @@ void Request::ObjectDataOut(DataChunk& chunk) {
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void Request::BytesOut(size_t len) {
-  WptTrace(loglevel::kFunction, _T("[wpthook] - Request::BytesOut(%d)"), len);
+  ATLTRACE("[wpthook] - Request::BytesOut(%d)", len);
   EnterCriticalSection(&cs);
   if (_is_active)
     _bytes_out += (DWORD)len;
@@ -653,7 +649,7 @@ void Request::BytesOut(size_t len) {
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void Request::SocketClosed() {
-  WptTrace(loglevel::kFunction, _T("[wpthook] - Request::SocketClosed()\n"));
+  ATLTRACE("[wpthook] - Request::SocketClosed()");
 
   EnterCriticalSection(&cs);
   if (_is_active) {
@@ -676,7 +672,7 @@ void Request::MatchConnections() {
     }
     if (!_connect_start.QuadPart)
       _sockets.ClaimConnect(_socket_id, _start, _connect_start, _connect_end,
-                            _ssl_start, _ssl_end);
+                            _ssl_start, _ssl_end, _certificate_bytes);
   }
   LeaveCriticalSection(&cs);
 }
@@ -959,8 +955,33 @@ ULONG Request::GetPeerAddress() {
 /*-----------------------------------------------------------------------------
 -----------------------------------------------------------------------------*/
 void Request::SetPriority(int depends_on, int weight, int exclusive) {
-  WptTrace(loglevel::kFunction, _T("[wpthook] - Request::SetPriority(), depends on %d, weight %d, exclusive %d"), depends_on, weight, exclusive);
+  ATLTRACE("[wpthook] - Request::SetPriority(), depends on %d, weight %d, exclusive %d", depends_on, weight, exclusive);
   _h2_priority_depends_on = depends_on;
   _h2_priority_weight = weight;
   _h2_priority_exclusive = exclusive;
+}
+
+/*-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------*/
+CStringA Request::GetChunkTimings() {
+  CStringA json;
+  if (!_chunk_timings.IsEmpty()) {
+    CStringA buff;
+    POSITION pos = _chunk_timings.GetHeadPosition();
+    while (pos) {
+      ChunkTiming timing = _chunk_timings.GetNext(pos);
+      DWORD elapsed = _test_state.ElapsedMsFromStart(timing.timestamp_);
+      if (elapsed > 0) {
+        buff.Format("[%d,%d]", elapsed, timing.length_);
+        if (json.IsEmpty()) {
+          json = "[" + buff;
+        } else {
+          json += "," + buff;
+        }
+      }
+    }
+    if (!json.IsEmpty())
+      json += "]";
+  }
+  return json;
 }

@@ -16,11 +16,16 @@ function GetTestStatus($id, $includePosition = true) {
   
   if (isset($_REQUEST['noposition']) && $_REQUEST['noposition'])
     $includePosition = false;
+  $testPath = './' . GetTestPath($id);
+  
+  // Fast-path for pending tests when we don't need to know the queue position (avoid test and location locks)
+  $waiting_file = "$testPath/test.waiting";
+  if (!$includePosition && is_file($waiting_file))
+    return array('statusCode' => 101, 'statusText' => 'Test pending', 'id' => $id);
   
   $ret = array('statusCode' => 400, 'statusText' => 'Test not found', 'id' => $id);
   $now = time();
   RestoreTest($id);
-  $testPath = './' . GetTestPath($id);
   if (is_dir($testPath) && is_file("$testPath/testinfo.ini")) {
     $testInfoJson = GetTestInfo($id);
     if ($testInfoJson) {
@@ -177,7 +182,7 @@ function GetTestStatus($id, $includePosition = true) {
               }
             } else {
               if ($includePosition && array_key_exists('workdir', $testInfoJson)) {
-                $count = FindJobPosition($testInfoJson['workdir'], $id);
+                $count = FindJobPosition($testInfoJson['location'], $testInfoJson['workdir'], $id);
                 if ($count >= 0) {
                   $ret['statusCode'] = 101;
                   $ret['behindCount'] = $count;

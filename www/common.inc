@@ -42,7 +42,7 @@ if (function_exists('curl_init')) {
 } else
     $CURL_CONTEXT = false;
 
-if ($_SERVER["REMOTE_ADDR"] == '127.0.0.1' && isset($_REQUEST['addr'])) {
+if (isset($_SERVER["REMOTE_ADDR"]) && $_SERVER["REMOTE_ADDR"] == '127.0.0.1' && isset($_REQUEST['addr'])) {
   $_SERVER["REMOTE_ADDR"] = $_REQUEST['addr'];
 }
 if (function_exists('apache_request_headers')) {
@@ -59,6 +59,9 @@ if (isset($_SERVER["HTTP_X_FORWARDED_FOR"])) {
         $_SERVER["REMOTE_ADDR"] = $forwarded_ip;
   }
 }
+if (isset($_SERVER["HTTP_FASTLY_CLIENT_IP"]))
+  $_SERVER["REMOTE_ADDR"] = $_SERVER["HTTP_FASTLY_CLIENT_IP"];
+
 if (array_key_exists('HTTP_MOD_REWRITE', $_SERVER) && $_SERVER['HTTP_MOD_REWRITE'] == 'On') {
     define('FRIENDLY_URLS', true);
     define('VER_TIMELINE', '28/');       // version of the timeline javascript
@@ -77,7 +80,7 @@ if (array_key_exists('HTTP_USER_AGENT', $_SERVER) &&
 define('VER_WEBPAGETEST', '2.19');   // webpagetest version
 define('VER_CSS', 68);           // version of the sitewide css file
 define('VER_JS', 32);            // version of the sitewide javascript file
-define('VER_JS_TEST', 32);       // version of the javascript specific to the test pages
+define('VER_JS_TEST', 33);       // version of the javascript specific to the test pages
 define('VER_JS_RUNNING', 1);     // version of the javascript specific to the test running status page
 define('UNKNOWN_TIME', -1);      // Value used as a flag for an unknown time.
                                  // To find code that fails to check that a time

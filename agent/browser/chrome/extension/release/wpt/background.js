@@ -13919,6 +13919,7 @@ var NAV_TIMING_SCRIPT = "\
       }\
     } catch(e){}\
   };\
+  addTime('domLoading');\
   addTime('domInteractive');\
   addTime('domContentLoadedEventStart');\
   addTime('domContentLoadedEventEnd');\
@@ -14018,7 +14019,6 @@ wpt.chromeDebugger.Init = function(tabId, chromeApi, callback) {
     g_instance.customMetrics = undefined;
     g_instance.timelineStackDepth = 0;
     g_instance.traceRunning = false;
-    g_instance.userTiming = [];
     var version = '1.0';
     if (g_instance.chromeApi_['debugger'])
         g_instance.chromeApi_.debugger.attach({tabId: g_instance.tabId_}, version, wpt.chromeDebugger.OnAttachDebugger);
@@ -14032,7 +14032,6 @@ wpt.chromeDebugger.SetActive = function(active) {
   if (active) {
     g_instance.requests = {};
     g_instance.idMap = {};
-    g_instance.userTiming = [];
     g_instance.receivedData = false;
     g_instance.statsDoneCallback = undefined;
     g_instance.customMetrics = undefined;
@@ -14088,7 +14087,7 @@ wpt.chromeDebugger.StartTrace = function() {
     else
       traceCategories = '-*';
     if (g_instance.timeline)
-      traceCategories = traceCategories + ',toplevel,blink.console,disabled-by-default-devtools.timeline,devtools.timeline,disabled-by-default-devtools.timeline.frame,devtools.timeline.frame';
+      traceCategories = traceCategories + ',toplevel,blink.console,disabled-by-default-devtools.timeline,devtools.timeline,disabled-by-default-devtools.timeline.frame,devtools.timeline.frame,v8.execute,disabled-by-default-blink.feature_usage,blink.user_timing';
     if (g_instance.timelineStackDepth > 0)
       traceCategories += ',disabled-by-default-devtools.timeline.stack,devtools.timeline.stack';
     var params = {categories: traceCategories, options:'record-as-much-as-possible'};
@@ -14129,30 +14128,22 @@ wpt.chromeDebugger.OnMessage = function(tabId, message, params) {
   var tracing = false;
   if (message === 'Tracing.dataCollected') {
     tracing = true;
-    if (params['value'] !== undefined) {
+    if (params['value'] !== undefined && params['value'].length && (g_instance.trace || g_instance.timeline)) {
       // Collect the netlog events separately for calculating the request timings
       var jsonStr = '';
       var len = params['value'].length;
       var first = true;
       for(var i = 0; i < len; i++) {
-        if (params['value'][i]['cat'] == 'blink.user_timing')
-          g_instance.userTiming.push(params['value'][i]);
         if (!first)
           jsonStr += ",\n";
         jsonStr += JSON.stringify(params['value'][i]);
         first = false;
       }
-      if (g_instance.trace || g_instance.timeline) {
-        wpt.chromeDebugger.sendEvent('trace', jsonStr);
-      }
+      wpt.chromeDebugger.sendEvent('trace', jsonStr);
     }
   }
   if (message === 'Tracing.tracingComplete') {
     tracing = true;
-    if (g_instance.userTiming.length) {
-      wpt.chromeDebugger.sendEvent('user_timing', JSON.stringify(g_instance.userTiming));
-      g_instance.userTiming = [];
-    }
     if (g_instance.statsDoneCallback)
       g_instance.statsDoneCallback();
   }
@@ -14169,6 +14160,10 @@ wpt.chromeDebugger.OnMessage = function(tabId, message, params) {
         params.frame['parentId'] === undefined &&
         g_instance.mobileEmulation != undefined) {
       g_instance.chromeApi_.debugger.sendCommand({tabId: g_instance.tabId_}, 'Page.setDeviceMetricsOverride', g_instance.mobileEmulation);
+    }
+
+    if (message === 'Page.loadEventFired') {
+      wpt.chromeDebugger.sendEvent('complete', '');
     }
     
     // Network events
@@ -14581,6 +14576,7 @@ wpt.chromeDebugger.collectNavigationTiming = function(callback) {
             result['domContentLoadedEventStart'] +
         '&domContentLoadedEventEnd=' +
             result['domContentLoadedEventEnd'] +
+        '&domLoading=' + result['domLoading'] +
         '&domInteractive=' + result['domInteractive'] +
         '&loadEventStart=' + result['loadEventStart'] +
         '&loadEventEnd=' + result['loadEventEnd'] +
@@ -14664,21 +14660,9 @@ wpt.chromeDebugger.SendInitiator = function(requestId, url, initiator_json) {
  * @param {string} event event string.
  * @param {string} data event data (post body).
  */
-wpt.chromeDebugger.sendEvent = function(event, data, callback) {
-  try {
-    var xhr = new XMLHttpRequest();
-    if (typeof callback !== 'undefined') {
-      xhr.onreadystatechange = function() {
-        if (xhr.readyState == 4) {
-          callback();
-        }
-      }
-    }
-    xhr.open('POST', 'http://127.0.0.1:8888/event/' + event, true);
-    xhr.send(data);
-  } catch (err) {
-    wpt.LOG.warning('Error sending request data XHR: ' + err);
-  }
+wpt.chromeDebugger.sendEvent = function(event, data) {
+  var url = 'http://127.0.0.1:8888/event/' + event ;
+  fetch(url, {method: 'POST', body: data});
 };
 
 })());  // namespace
@@ -14724,19 +14708,12 @@ goog.provide('wpt.main');
 
 ((function() {  // namespace
 
-/**
- * Chrome does some work on startup that might have a performance impact.
- * For example, if an extension is loaded using group policy, the installation
- * will download and install that extension shortly after startup.  We don't
- * want the timing of tests altered by this work, so wait a few seconds after
- * startup before starting to perform measurements.
- *
- * @const
- */
-var STARTUP_DELAY = 1000;
+/** @const */
+var STARTUP_DELAY = 500;
+var STARTUP_FAILSAFE_DELAY = 5000;
 
 /** @const */
-var TASK_INTERVAL = 1000;
+var TASK_INTERVAL = 500;
 
 // Run tasks slowly when testing, so that we can see errors in the logs
 // before navigation closes the dev tools window.
@@ -14777,6 +14754,8 @@ var g_manipulatingHeaders = false;
 var g_hasCustomCommandLine = false;
 var g_started = false;
 var g_requestsHooked = false;
+var g_failsafeStartup = undefined;
+var g_updatedCount = 0;
 
 /**
  * Uninstall a given set of extensions.  Run |onComplete| when done.
@@ -14829,17 +14808,24 @@ wpt.main.startMeasurements = function() {
   } else {
     // Fetch tasks from wptdriver.exe.
     window.setInterval(wptGetTask, TASK_INTERVAL);
+    window.setTimeout(wptGetTask, TASK_INTERVAL_SHORT);
   }
 };
 
 // Install an onLoad handler for all tabs.
 chrome.tabs.onUpdated.addListener(function(tabId, props) {
-  if (!g_started && g_starting && props.status == 'complete') {
+  g_updatedCount++;
+  if (!g_started && g_starting && (props.status == 'complete' || g_updatedCount > 5)) {
+    // Kill the failsafe timer
+    if (g_failsafeStartup != undefined) {
+      clearInterval(g_failsafeStartup);
+      g_failsafeStartup = undefined;
+    }
     // handle the startup sequencing (attach the debugger
     // after the browser loads and then start testing).
     g_started = true;
     wpt.main.onStartup();
-  }else if (g_active && tabId == g_tabid) {
+  } else if (g_active && tabId == g_tabid) {
     if (props.status == 'loading') {
       g_start = new Date().getTime();
       wptSendEvent('navigate', '');
@@ -14910,51 +14896,39 @@ function wptFeedFakeTasks() {
 function wptGetTask() {
   if (!g_requesting_task && !g_processing_task) {
     g_requesting_task = true;
-    try {
-      var xhr = new XMLHttpRequest();
-      xhr.open('GET', 'http://127.0.0.1:8888/task', true);
-      xhr.onreadystatechange = function() {
-        if (xhr.readyState != 4)
-          return;
-        if (xhr.status != 200) {
-          wpt.LOG.warning('Got unexpected (not 200) XHR status: ' + xhr.status);
+    fetch('http://127.0.0.1:8888/task').then(function(response) {
+      if (response.status == 200) {
+        response.json().then(function(resp) {
+          try {
+            if (resp['statusCode'] == 200) {
+              if (resp['data'] !== undefined) {
+                wptExecuteTask(resp.data);
+              }
+            } else {
+              wpt.LOG.warning('Got unexpected status code ' + resp['statusCode']);
+            }
+            g_requesting_task = false;
+          } catch(err) {
+            g_requesting_task = false;
+            wpt.LOG.warning('Execute task threw an exception');
+          }
+        }).catch(function() {
           g_requesting_task = false;
-          return;
-        }
-        var resp = JSON.parse(xhr.responseText);
-        if (resp.statusCode != 200) {
-          wpt.LOG.warning('Got unexpected status code ' + resp.statusCode);
-          g_requesting_task = false;
-          return;
-        }
-        if (!resp.data) {
-          g_requesting_task = false;
-          return;
-        }
-        wptExecuteTask(resp.data);
+        });
+      } else {
+        wpt.LOG.warning('Unexpected task response status: ' + response.status);
         g_requesting_task = false;
-      };
-      xhr.onerror = function() {
-        wpt.LOG.warning('Got an XHR error!');
-        g_requesting_task = false;
-      };
-      xhr.send();
-    } catch (err) {
-      wpt.LOG.warning('Error getting task: ' + err);
+      }
+    }).catch(function(err) {
       g_requesting_task = false;
-    }
+      wpt.LOG.warning('Task fetch failed');
+    });
   }
 }
 
-function wptSendEvent(event_name, query_string, data) {
-  try {
-    var xhr = new XMLHttpRequest();
-    xhr.open('POST', 'http://127.0.0.1:8888/event/' + event_name + query_string,
-             true);
-    xhr.send(data);
-  } catch (err) {
-    wpt.LOG.warning('Error sending page load XHR: ' + err);
-  }
+function wptSendEvent(event_name, data, attempt) {
+  var url = 'http://127.0.0.1:8888/event/' + event_name ;
+  fetch(url, {method: 'POST', body: data});
 }
 
 function wptHostMatches(host, filter) {
@@ -15090,26 +15064,22 @@ chrome.extension.onRequest.addListener(
     if (request.message == 'DOMElementLoaded') {
       var dom_element_time = new Date().getTime() - g_start;
       wptSendEvent(
-          'dom_element',
-          '?name_value=' + encodeURIComponent(request.name_value) +
-          '&time=' + dom_element_time);
+          'dom_element?name_value=' + encodeURIComponent(request.name_value) +
+          '&time=' + dom_element_time, '');
     }
     else if (request.message == 'AllDOMElementsLoaded') {
       var time = new Date().getTime() - g_start;
-      wptSendEvent(
-          'all_dom_elements_loaded',
-          '?load_time=' + time);
+      wptSendEvent('all_dom_elements_loaded?load_time=' + time, '');
     }
     else if (request.message == 'wptLoad') {
-      wptSendEvent('load', 
-                   '?timestamp=' + request.timestamp + 
-                   '&fixedViewport=' + request.fixedViewport);
+      wptSendEvent('load?timestamp=' + request.timestamp + 
+                   '&fixedViewport=' + request.fixedViewport, '');
     } else if (request.message == 'wptResponsive') {
       if (request['isResponsive'] !== undefined)
-        wptSendEvent('responsive', '?isResponsive=' + request.isResponsive);
+        wptSendEvent('responsive?isResponsive=' + request.isResponsive, '');
     } else if (request.message == 'wptCustomMetrics') {
       if (request['data'] !== undefined)
-        wptSendEvent('custom_metrics', '', JSON.stringify(request.data));
+        wptSendEvent('custom_metrics', JSON.stringify(request.data));
     }
     // TODO: check whether calling sendResponse blocks in the content script
     // side in page.
@@ -15135,118 +15105,118 @@ function wptExecuteTask(task) {
       g_active = false;
       wpt.chromeDebugger.SetActive(g_active);
     }
-  // Decode and execute the actual command.
-  // Commands are all lowercase at this point.
-  wpt.LOG.info('Running task ' + task.action + ' ' + task.target);
-  switch (task.action) {
-    case 'navigate':
-      g_processing_task = true;
-      g_commandRunner.doNavigate(task.target, wptTaskCallback);
-      break;
-    case 'exec':
-      g_processing_task = true;
-      wpt.chromeDebugger.Exec(task.target, wptTaskCallback);
-      break;
-    case 'setcookie':
-      g_commandRunner.doSetCookie(task.target, task.value);
-      break;
-    case 'block':
-      g_commandRunner.doBlock(task.target);
-      break;
-    case 'setdomelement':
-      // Sending request to set the DOM element has to happen only at the
-      // navigate event after the content script is loaded. So, this just
-      // sets the global variable.
-      wpt.commands.g_domElements.push(task.target);
-      break;
-    case 'click':
-      g_processing_task = true;
-      g_commandRunner.doClick(task.target, wptTaskCallback);
-      break;
-    case 'setinnerhtml':
-      g_processing_task = true;
-      g_commandRunner.doSetInnerHTML(task.target, task.value, wptTaskCallback);
-      break;
-    case 'setinnertext':
-      g_processing_task = true;
-      g_commandRunner.doSetInnerText(task.target, task.value, wptTaskCallback);
-      break;
-    case 'setvalue':
-      g_processing_task = true;
-      g_commandRunner.doSetValue(task.target, task.value, wptTaskCallback);
-      break;
-    case 'submitform':
-      g_processing_task = true;
-      g_commandRunner.doSubmitForm(task.target, wptTaskCallback);
-      break;
-    case 'clearcache':
-      g_processing_task = true;
-      g_commandRunner.doClearCache(task.target, wptTaskCallback);
-      break;
-    case 'capturetimeline':
-      wpt.chromeDebugger.CaptureTimeline(parseInt(task.target));
-      break;
-    case 'capturetrace':
-      wpt.chromeDebugger.CaptureTrace(task.target);
-      break;
-    case 'noscript':
-      g_commandRunner.doNoScript();
-      break;
-    case 'overridehost':
-      g_overrideHosts[task.target] = task.value;
-      g_manipulatingHeaders = true;
-      wptHookRequests();
-      break;
-    case 'addheader':
-      var separator = task.target.indexOf(":");
-      if (separator > 0) {
-        g_addHeaders.push({'name' : task.target.substr(0, separator).trim(),
-                           'value' : task.target.substr(separator + 1).trim(),
-                           'filter' : typeof(task.value) === 'undefined' ? '' : task.value});
+    // Decode and execute the actual command.
+    // Commands are all lowercase at this point.
+    wpt.LOG.info('Running task ' + task.action + ' ' + task.target);
+    switch (task.action) {
+      case 'navigate':
+        g_processing_task = true;
+        g_commandRunner.doNavigate(task.target, wptTaskCallback);
+        break;
+      case 'exec':
+        g_processing_task = true;
+        wpt.chromeDebugger.Exec(task.target, wptTaskCallback);
+        break;
+      case 'setcookie':
+        g_commandRunner.doSetCookie(task.target, task.value);
+        break;
+      case 'block':
+        g_commandRunner.doBlock(task.target);
+        break;
+      case 'setdomelement':
+        // Sending request to set the DOM element has to happen only at the
+        // navigate event after the content script is loaded. So, this just
+        // sets the global variable.
+        wpt.commands.g_domElements.push(task.target);
+        break;
+      case 'click':
+        g_processing_task = true;
+        g_commandRunner.doClick(task.target, wptTaskCallback);
+        break;
+      case 'setinnerhtml':
+        g_processing_task = true;
+        g_commandRunner.doSetInnerHTML(task.target, task.value, wptTaskCallback);
+        break;
+      case 'setinnertext':
+        g_processing_task = true;
+        g_commandRunner.doSetInnerText(task.target, task.value, wptTaskCallback);
+        break;
+      case 'setvalue':
+        g_processing_task = true;
+        g_commandRunner.doSetValue(task.target, task.value, wptTaskCallback);
+        break;
+      case 'submitform':
+        g_processing_task = true;
+        g_commandRunner.doSubmitForm(task.target, wptTaskCallback);
+        break;
+      case 'clearcache':
+        g_processing_task = true;
+        g_commandRunner.doClearCache(task.target, wptTaskCallback);
+        break;
+      case 'capturetimeline':
+        wpt.chromeDebugger.CaptureTimeline(parseInt(task.target));
+        break;
+      case 'capturetrace':
+        wpt.chromeDebugger.CaptureTrace(task.target);
+        break;
+      case 'noscript':
+        g_commandRunner.doNoScript();
+        break;
+      case 'overridehost':
+        g_overrideHosts[task.target] = task.value;
         g_manipulatingHeaders = true;
         wptHookRequests();
-      }
-      break;
-    case 'setheader':
-      var separator = task.target.indexOf(":");
-      if (separator > 0) {
-        g_setHeaders.push({'name' : task.target.substr(0, separator).trim(),
-                           'value' : task.target.substr(separator + 1).trim(),
-                           'filter' : typeof(task.value) === 'undefined' ? '' : task.value});
-        g_manipulatingHeaders = true;
-        wptHookRequests();
-      }
-      break;
-    case 'resetheaders':
-      g_addHeaders = [];
-      g_setHeaders = [];
-      break;
-    case 'appenduseragent':
-      wpt.chromeDebugger.SetUserAgent(navigator.userAgent + ' ' + task.target);
-      break;
-    case 'collectstats':
-      g_processing_task = true;
-      wpt.chromeDebugger.CollectStats(task.target, wptTaskCallback);
-      break;
-    case 'emulatemobile':
-      wpt.chromeDebugger.EmulateMobile(task.target);
-      break;
-    case 'checkresponsive':
-      g_processing_task = true;
-      g_commandRunner.doCheckResponsive(wptTaskCallback);
-      break;
-    case 'hascustomcommandline':
-      g_hasCustomCommandLine = true;
-      break;
+        break;
+      case 'addheader':
+        var separator = task.target.indexOf(":");
+        if (separator > 0) {
+          g_addHeaders.push({'name' : task.target.substr(0, separator).trim(),
+                             'value' : task.target.substr(separator + 1).trim(),
+                             'filter' : typeof(task.value) === 'undefined' ? '' : task.value});
+          g_manipulatingHeaders = true;
+          wptHookRequests();
+        }
+        break;
+      case 'setheader':
+        var separator = task.target.indexOf(":");
+        if (separator > 0) {
+          g_setHeaders.push({'name' : task.target.substr(0, separator).trim(),
+                             'value' : task.target.substr(separator + 1).trim(),
+                             'filter' : typeof(task.value) === 'undefined' ? '' : task.value});
+          g_manipulatingHeaders = true;
+          wptHookRequests();
+        }
+        break;
+      case 'resetheaders':
+        g_addHeaders = [];
+        g_setHeaders = [];
+        break;
+      case 'appenduseragent':
+        wpt.chromeDebugger.SetUserAgent(navigator.userAgent + ' ' + task.target);
+        break;
+      case 'collectstats':
+        g_processing_task = true;
+        wpt.chromeDebugger.CollectStats(task.target, wptTaskCallback);
+        break;
+      case 'emulatemobile':
+        wpt.chromeDebugger.EmulateMobile(task.target);
+        break;
+      case 'checkresponsive':
+        g_processing_task = true;
+        g_commandRunner.doCheckResponsive(wptTaskCallback);
+        break;
+      case 'hascustomcommandline':
+        g_hasCustomCommandLine = true;
+        break;
 
-    default:
-      wpt.LOG.error('Unimplemented command: ', task);
-  }
-
-  if (!g_active && !g_processing_task)
-    window.setTimeout(wptGetTask, TASK_INTERVAL_SHORT);
+      default:
+        wpt.LOG.error('Unimplemented command: ', task);
     }
+
+    if (!g_active && !g_processing_task)
+      window.setTimeout(wptGetTask, TASK_INTERVAL_SHORT);
   }
+}
 
 // start out by grabbing the main tab and forcing a navigation to
 // the local blank page so we are guaranteed to see the navigation
@@ -15263,6 +15233,7 @@ chrome.tabs.query(queryForFocusedTab, function(focusedTabs) {
   g_commandRunner = new wpt.commands.CommandRunner(g_tabid, window.chrome);
   wpt.chromeDebugger.Init(g_tabid, window.chrome, function(){
     setTimeout(function(){g_starting = true;chrome.tabs.update(g_tabid, {'url': STARTUP_URL});}, STARTUP_DELAY);
+    g_failsafeStartup = setInterval(function(){g_starting = true;chrome.tabs.update(g_tabid, {'url': STARTUP_URL});}, STARTUP_FAILSAFE_DELAY);
   });
 });
 

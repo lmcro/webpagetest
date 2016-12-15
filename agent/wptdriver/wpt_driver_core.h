@@ -50,6 +50,7 @@ private:
   HANDLE      _work_thread;
   HANDLE      _testing_mutex;
   CIpfw       _ipfw;
+  Shaper      _shaper;
   HANDLE      housekeeping_timer_;
   bool        has_gpu_;
   bool        watchdog_started_;
@@ -71,6 +72,7 @@ private:
   void PreTest();
   void PostTest();
   bool Startup();
+  void WaitForStartup();
   LPTSTR GetAppInitString(LPCTSTR new_dll, bool is64bit);
   bool NeedsReboot();
   CAtlList<CString> reset_browsers;

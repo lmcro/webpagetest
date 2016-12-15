@@ -68,7 +68,7 @@ function loadPageRunData($testPath, $run, $cached, $options = null, $testInfo = 
  * @return array|null Associative array with data for the given run or null on failure
  */
 function loadPageStepData($localPaths, $runCompleted, $options = null, $testInfo = null) {
-  $cacheVer = 2;
+  $cacheVer = 3;
   $cacheFile = $localPaths->pageDataCacheFile($cacheVer);
   $ret = null;
   if (gz_is_file($cacheFile))
@@ -114,6 +114,13 @@ function loadPageStepData($localPaths, $runCompleted, $options = null, $testInfo
             $ret["custom"][] = $metric;
           }
         }
+      }
+      
+      // Load main-thread interactive windows if available
+      if (gz_is_file($localPaths->interactiveFile())) {
+        $interactive = json_decode(gz_file_get_contents($localPaths->interactiveFile()), true);
+        if (isset($interactive) && is_array($interactive) && count($interactive))
+          $ret['interactivePeriods'] = $interactive;
       }
 
       // see if we have CSI metrics to load
@@ -161,19 +168,21 @@ function loadPageStepData($localPaths, $runCompleted, $options = null, $testInfo
           }
         }
       }
-      require_once(__DIR__ . '/video/visualProgress.inc.php');
-      $progress = GetVisualProgressForStep($localPaths, $runCompleted, null, null, $startOffset);
-      if (isset($progress) && is_array($progress)) {
-        if (array_key_exists('SpeedIndex', $progress))
-          $ret['SpeedIndex'] = $progress['SpeedIndex'];
-        if (array_key_exists('visualComplete', $progress))
-          $ret['visualComplete'] = $progress['visualComplete'];
-        if (array_key_exists('startRender', $progress) && (!array_key_exists('render', $ret) || !$ret['render']))
-          $ret['render'] = $progress['startRender'];
-        if ((!array_key_exists('lastVisualChange', $ret) ||
-            !$ret['lastVisualChange']) &&
-          array_key_exists('visualComplete', $ret))
-          $ret['lastVisualChange'] = $ret['visualComplete'];
+      if (!isset($ret['SpeedIndex'])) {
+        require_once(__DIR__ . '/video/visualProgress.inc.php');
+        $progress = GetVisualProgressForStep($localPaths, $runCompleted, null, null, $startOffset);
+        if (isset($progress) && is_array($progress)) {
+          if (array_key_exists('SpeedIndex', $progress))
+            $ret['SpeedIndex'] = $progress['SpeedIndex'];
+          if (array_key_exists('visualComplete', $progress))
+            $ret['visualComplete'] = $progress['visualComplete'];
+          if (array_key_exists('startRender', $progress) && (!array_key_exists('render', $ret) || !$ret['render']))
+            $ret['render'] = $progress['startRender'];
+          if ((!array_key_exists('lastVisualChange', $ret) ||
+              !$ret['lastVisualChange']) &&
+            array_key_exists('visualComplete', $ret))
+            $ret['lastVisualChange'] = $ret['visualComplete'];
+        }
       }
       // see if we need a custom Speed Index as well
       $end = null;
@@ -191,10 +200,13 @@ function loadPageStepData($localPaths, $runCompleted, $options = null, $testInfo
         $processing = GetDevToolsCPUTimeForStep($localPaths, $ret['fullyLoaded']);
         if (isset($processing) && is_array($processing) && count($processing)) {
           $ret['cpuTimes'] = $processing;
-          if (isset($ret['docTime']) && $ret['docTime']) {
-            $processing = GetDevToolsCPUTimeForStep($localPaths, $ret['docTime']);
-            if (isset($processing) && is_array($processing) && count($processing)) {
-              $ret['cpuTimesDoc'] = $processing;
+          // Create top-level metrics for each as well
+          foreach ($processing as $key => $value)
+            $ret["cpu.$key"] = $value;
+          if (isset($ret['docTime']) && $ret['docTime']) {    
+            $processing = GetDevToolsCPUTimeForStep($localPaths, $ret['docTime']);    
+            if (isset($processing) && is_array($processing) && count($processing)) {    
+              $ret['cpuTimesDoc'] = $processing;      
             }
           }
         }
@@ -412,6 +424,9 @@ function loadPageData($file, $options = null)
                 if ((isset($fields[101]) && strlen(trim($fields[101])))) $ret['domInteractive'] = intval(trim($fields[101]));
                 if ((isset($fields[102]) && strlen(trim($fields[102])))) $ret['domLoading'] = intval(trim($fields[102]));
                 if ((isset($fields[103]) && strlen(trim($fields[103])))) $ret['base_page_ttfb'] = intval(trim($fields[103]));
+                if ((isset($fields[104]) && strlen(trim($fields[104])))) $ret['visualComplete'] = intval(trim($fields[104]));
+                if ((isset($fields[105]) && strlen(trim($fields[105])))) $ret['SpeedIndex'] = intval(trim($fields[105]));
+                if ((isset($fields[106]) && strlen(trim($fields[106])))) $ret['certificate_bytes'] = intval(trim($fields[106]));
                 
                 $ret['date'] = strtotime(trim($fields[0]) . ' ' . trim($fields[1]));
                 if (!strlen($ret['pageSpeedVersion']))

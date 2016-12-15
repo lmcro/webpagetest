@@ -142,6 +142,13 @@ class TestPaths {
   }
 
   /**
+   * @return string Path for request data file
+   */
+  public function requestDataJsonFile() {
+    return $this->testRoot . $this->underscoreIdentifier() . "_requests.json";
+  }
+
+  /**
    * @return string Path for utilization file
    */
   public function utilizationFile() {
@@ -224,6 +231,13 @@ class TestPaths {
   }
 
   /**
+   * @return string Path for Main thread interactive time periods
+   */
+  public function interactiveFile() {
+    return $this->testRoot . $this->underscoreIdentifier() . "_interactive.json";
+  }
+
+  /**
    * @return string Path for Chrome trace user timing
    */
   public function chromeUserTimingFile() {
@@ -249,6 +263,13 @@ class TestPaths {
    */
   public function devtoolsCPUTimelineFile() {
     return $this->testRoot . $this->underscoreIdentifier() . "_timeline_cpu.json";
+  }
+
+  /**
+   * @return string Path for devtools script execution times timeline
+   */
+  public function devtoolsScriptTimingFile() {
+    return $this->testRoot . $this->underscoreIdentifier() . "_script_timing.json";
   }
 
   /**

@@ -53,7 +53,8 @@ SocketInfo::SocketInfo():
   , _h2_in(NULL)
   , _h2_out(NULL)
   , _ssl_in(NULL)
-  , _ssl_out(NULL) {
+  , _ssl_out(NULL)
+  , _certificate_bytes(0) {
   memset(&_addr, 0, sizeof(_addr));
   _connect_start.QuadPart = 0;
   _connect_end.QuadPart = 0;
@@ -140,14 +141,11 @@ bool TrackSockets::Connect(SOCKET s, const struct sockaddr FAR * name,
                             int namelen) {
   bool allowed = true;
 
-  WptTrace(loglevel::kFunction, 
-            _T("[wpthook] - TrackSockets::Connect(%d)\n"), s);
+  ATLTRACE("[wpthook] - TrackSockets::Connect(%d)", s);
 
   // We only care about IP sockets at this point.
   if (name->sa_family == AF_INET6) {
-    WptTrace(
-        loglevel::kFunction, 
-        _T("[wpthook] - TrackSockets::Connect: Warning: IPv6 unsupported!\n"));
+    ATLTRACE("[wpthook] - TrackSockets::Connect: Warning: parsing of IPv6 unsupported!");
   }
   if (namelen >= sizeof(struct sockaddr_in) && name->sa_family == AF_INET) {
     struct sockaddr_in* ip_name = (struct sockaddr_in *)name;
@@ -185,9 +183,7 @@ void TrackSockets::Connected(SOCKET s) {
         addrlen == sizeof(client))
       local_port = ntohs(client.sin_port);
 
-    WptTrace(loglevel::kFunction, 
-              _T("[wpthook] - TrackSockets::Connected(%d) - Client port: %d\n"),
-                 s, local_port);
+    ATLTRACE("[wpthook] - TrackSockets::Connected(%d) - Client port: %d", s, local_port);
 
     EnterCriticalSection(&cs);
     SocketInfo* info = GetSocketInfo(s);
@@ -390,7 +386,8 @@ void TrackSockets::Reset() {
 -----------------------------------------------------------------------------*/
 bool TrackSockets::ClaimConnect(DWORD socket_id, LARGE_INTEGER before, 
                                 LARGE_INTEGER& start, LARGE_INTEGER& end,
-                                LARGE_INTEGER& ssl_start, LARGE_INTEGER& ssl_end) {
+                                LARGE_INTEGER& ssl_start, LARGE_INTEGER& ssl_end,
+                                int& certificate_bytes) {
   bool is_claimed = false;
   EnterCriticalSection(&cs);
   SocketInfo * info = NULL;
@@ -404,6 +401,7 @@ bool TrackSockets::ClaimConnect(DWORD socket_id, LARGE_INTEGER before,
       end = info->_connect_end;
       ssl_start = info->_ssl_start;
       ssl_end = info->_ssl_end;
+      certificate_bytes = info->_certificate_bytes;
     }
   }
   LeaveCriticalSection(&cs);
@@ -871,7 +869,7 @@ int h2_on_header_callback(nghttp2_session *session, const nghttp2_frame *frame,
     stream_id = frame->push_promise.promised_stream_id;
 
   if (user_data && name && value) {
-    ATLTRACE("h2_on_header_callback - stream %d '%S' : '%S'",
+    ATLTRACE("h2_on_header_callback - stream %d '%s' : '%s'",
              stream_id, name, value);
     H2_USER_DATA * u = (H2_USER_DATA *)user_data;
     if (u->connection) {

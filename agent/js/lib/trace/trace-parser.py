@@ -15,11 +15,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 import gzip
-import json
 import logging
 import math
 import os
 import time
+
+# try a fast json parser if it is installed
+try:
+  import ujson as json
+except:
+  import json
 
 ########################################################################################################################
 #   Trace processing
@@ -32,7 +37,12 @@ class Trace():
     self.user_timing = []
     self.event_names = {}
     self.event_name_lookup = {}
+    self.scripts = None
     self.timeline_events = []
+    self.trace_events = []
+    self.interactive = []
+    self.interactive_start = 0
+    self.interactive_end = None
     self.start_time = None
     self.end_time = None
     self.cpu = {'main_thread': None}
@@ -44,55 +54,36 @@ class Trace():
   ########################################################################################################################
   #   Output Logging
   ########################################################################################################################
-  def WriteUserTiming(self, file):
+  def WriteJson(self, file, json_data):
     try:
       file_name, ext = os.path.splitext(file)
       if ext.lower() == '.gz':
         with gzip.open(file, 'wb') as f:
-          json.dump(self.user_timing, f)
+          json.dump(json_data, f)
       else:
         with open(file, 'w') as f:
-          json.dump(self.user_timing, f)
+          json.dump(json_data, f)
     except:
-      logging.critical("Error writing user timing to " + file)
+      logging.critical("Error writing to " + file)
+
+  def WriteUserTiming(self, file):
+    self.WriteJson(file, self.user_timing)
 
   def WriteCPUSlices(self, file):
-    try:
-      file_name, ext = os.path.splitext(file)
-      if ext.lower() == '.gz':
-        with gzip.open(file, 'wb') as f:
-          json.dump(self.cpu, f)
-      else:
-        with open(file, 'w') as f:
-          json.dump(self.cpu, f)
-    except:
-      logging.critical("Error writing user timing to " + file)
+    self.WriteJson(file, self.cpu)
+
+  def WriteScriptTimings(self, file):
+    if self.scripts is not None:
+      self.WriteJson(file, self.scripts)
 
   def WriteFeatureUsage(self, file):
-    if self.feature_usage is not None:
-      try:
-        file_name, ext = os.path.splitext(file)
-        if ext.lower() == '.gz':
-          with gzip.open(file, 'wb') as f:
-            json.dump(self.feature_usage, f)
-        else:
-          with open(file, 'w') as f:
-            json.dump(self.feature_usage, f)
-      except:
-        logging.critical("Error writing feature usage to " + file)
+    self.WriteJson(file, self.feature_usage)
+
+  def WriteInteractive(self, file):
+    self.WriteJson(file, self.interactive)
 
   def WriteNetlog(self, file):
-    try:
-      file_name, ext = os.path.splitext(file)
-      if ext.lower() == '.gz':
-        with gzip.open(file, 'wb') as f:
-          json.dump(self.netlog, f)
-      else:
-        with open(file, 'w') as f:
-          json.dump(self.netlog, f)
-    except:
-      logging.critical("Error writing netlog details to " + file)
-    print json.dumps(self.netlog, sort_keys=True, indent = 4)
+    self.WriteJson(file, self.netlog)
 
 
   ########################################################################################################################
@@ -113,29 +104,86 @@ class Trace():
           trace_event = json.loads(line.strip("\r\n\t ,"))
           if not line_mode and 'traceEvents' in trace_event:
             for sub_event in trace_event['traceEvents']:
-              self.ProcessTraceEvent(sub_event)
+              self.FilterTraceEvent(sub_event)
           else:
             line_mode = True
-            self.ProcessTraceEvent(trace_event)
+            self.FilterTraceEvent(trace_event)
         except:
           pass
     except:
       logging.critical("Error processing trace " + trace)
-
     if f is not None:
       f.close()
+    self.ProcessTraceEvents()
+
+  def ProcessTimeline(self, timeline):
+    self.__init__()
+    self.cpu['main_thread'] = '0'
+    self.threads['0'] = {}
+    events = None
+    f = None
+    try:
+      file_name, ext = os.path.splitext(timeline)
+      if ext.lower() == '.gz':
+        f = gzip.open(timeline, 'rb')
+      else:
+        f = open(timeline, 'r')
+      events = json.load(f)
+      if events:
+        # convert the old format timeline events into our internal representation
+        for event in events:
+          if 'method' in event and 'params' in event:
+            if self.start_time is None:
+              if event['method'] == 'Network.requestWillBeSent' and 'timestamp' in event['params']:
+                self.start_time = event['params']['timestamp'] * 1000000.0
+                self.end_time = event['params']['timestamp'] * 1000000.0
+            else:
+              if 'timestamp' in event['params']:
+                t = event['params']['timestamp'] * 1000000.0
+                if t > self.end_time:
+                  self.end_time = t
+              if event['method'] == 'Timeline.eventRecorded' and 'record' in event['params']:
+                e = self.ProcessOldTimelineEvent(event['params']['record'], None)
+                if e is not None:
+                  self.timeline_events.append(e)
+        self.ProcessTimelineEvents()
+    except:
+      logging.critical("Error processing timeline " + timeline)
+    if f is not None:
+      f.close()
+
+  def FilterTraceEvent(self, trace_event):
+    cat = trace_event['cat']
+    if cat == 'toplevel' or cat == 'ipc,toplevel':
+      return
+    if cat == 'devtools.timeline' or \
+            cat.find('devtools.timeline') >= 0 or \
+            cat.find('blink.feature_usage') >= 0 or \
+            cat.find('blink.user_timing') >= 0:
+      self.trace_events.append(trace_event)
+
+  def ProcessTraceEvents(self):
+    #sort the raw trace events by timestamp and then process them
+    if len(self.trace_events):
+      self.trace_events.sort(key=lambda trace_event: trace_event['ts'])
+      for trace_event in self.trace_events:
+        self.ProcessTraceEvent(trace_event)
+      self.trace_events = []
+
+    # Do the post-processing on timeline events
     self.ProcessTimelineEvents()
 
   def ProcessTraceEvent(self, trace_event):
     cat = trace_event['cat']
-    if cat.find('blink.user_timing') >= 0:
-      self.user_timing.append(trace_event)
-    if cat.find('blink.feature_usage') >= 0:
-      self.ProcessFeatureUsageEvent(trace_event)
-    if cat.find('netlog') >= 0:
-      self.ProcessNetlogEvent(trace_event)
-    if cat.find('devtools.timeline') >= 0:
+    if cat == 'devtools.timeline' or cat.find('devtools.timeline') >= 0:
       self.ProcessTimelineTraceEvent(trace_event)
+    elif cat.find('blink.feature_usage') >= 0:
+      self.ProcessFeatureUsageEvent(trace_event)
+    elif cat.find('blink.user_timing') >= 0:
+      self.user_timing.append(trace_event)
+    #Netlog support is still in progress
+    #elif cat.find('netlog') >= 0:
+    #  self.ProcessNetlogEvent(trace_event)
 
 
   ########################################################################################################################
@@ -181,6 +229,15 @@ class Trace():
             e['e'] = trace_event['ts']
       else:
         e = {'t': thread, 'n': self.event_names[trace_event['name']], 's': trace_event['ts']}
+        if (trace_event['name'] == 'EvaluateScript' or trace_event['name'] == 'v8.compile' or trace_event['name'] == 'v8.parseOnBackground')\
+                and 'args' in trace_event and 'data' in trace_event['args'] and 'url' in trace_event['args']['data'] and\
+                trace_event['args']['data']['url'].startswith('http'):
+          e['js'] = trace_event['args']['data']['url']
+        if trace_event['name'] == 'FunctionCall' and 'args' in trace_event and 'data' in trace_event['args']:
+          if 'scriptName' in trace_event['args']['data'] and trace_event['args']['data']['scriptName'].startswith('http'):
+            e['js'] = trace_event['args']['data']['scriptName']
+          elif 'url' in trace_event['args']['data'] and trace_event['args']['data']['url'].startswith('http'):
+            e['js'] = trace_event['args']['data']['url']
         if trace_event['ph'] == 'B':
           self.thread_stack[thread].append(e)
           e = None
@@ -200,6 +257,49 @@ class Trace():
         else:
           self.timeline_events.append(e)
 
+  def ProcessOldTimelineEvent(self, event, type):
+    e = None
+    thread = '0'
+    if 'type' in event:
+      type = event['type']
+    if type not in self.event_names:
+      self.event_names[type] = len(self.event_names)
+      self.event_name_lookup[self.event_names[type]] = type
+    if type not in self.threads[thread]:
+      self.threads[thread][type] = self.event_names[type]
+    start = None
+    end = None
+    if 'startTime' in event and 'endTime' in event:
+      start = event['startTime'] * 1000000.0
+      end = event['endTime'] * 1000000.0
+    if 'callInfo' in event:
+      if 'startTime' in event['callInfo'] and 'endTime' in event['callInfo']:
+        start = event['callInfo']['startTime'] * 1000000.0
+        end = event['callInfo']['endTime'] * 1000000.0
+    if start is not None and end is not None and end >= start and type is not None:
+      if end > self.end_time:
+        self.end_time = end
+      e = {'t': thread, 'n': self.event_names[type], 's': start, 'e': end}
+      if 'callInfo' in event and 'url' in event and event['url'].startswith('http'):
+        e['js'] = event['url']
+      # Process profile child events
+      if 'data' in event and 'profile' in event['data'] and 'rootNodes' in event['data']['profile']:
+        for child in event['data']['profile']['rootNodes']:
+          c = self.ProcessOldTimelineEvent(child, type)
+          if c is not None:
+            if 'c' not in e:
+              e['c'] = []
+            e['c'].append(c)
+      # recursively process any child events
+      if 'children' in event:
+        for child in event['children']:
+          c = self.ProcessOldTimelineEvent(child, type)
+          if c is not None:
+            if 'c' not in e:
+              e['c'] = []
+            e['c'].append(c)
+    return e
+
   def ProcessTimelineEvents(self):
     if len(self.timeline_events) and self.end_time > self.start_time:
       # Figure out how big each slice should be in usecs. Size it to a power of 10 where we have at least 2000 slices
@@ -217,16 +317,19 @@ class Trace():
       # Create the empty time slices for all of the threads
       self.cpu['slices'] = {}
       for thread in self.threads.keys():
-        self.cpu['slices'][thread] = {}
+        self.cpu['slices'][thread] = {'total': [0.0] * slice_count}
         for name in self.threads[thread].keys():
           self.cpu['slices'][thread][name] = [0.0] * slice_count
 
       # Go through all of the timeline events recursively and account for the time they consumed
       for timeline_event in self.timeline_events:
         self.ProcessTimelineEvent(timeline_event, None)
+      if self.interactive_end is not None and self.interactive_end - self.interactive_start > 500000:
+        self.interactive.append([int(math.ceil(self.interactive_start / 1000.0)), int(math.floor(self.interactive_end / 1000.0))])
 
       # Go through all of the fractional times and convert the float fractional times to integer usecs
       for thread in self.cpu['slices'].keys():
+        del self.cpu['slices'][thread]['total']
         for name in self.cpu['slices'][thread].keys():
           for slice in range(len(self.cpu['slices'][thread][name])):
             self.cpu['slices'][thread][name][slice] =\
@@ -236,8 +339,43 @@ class Trace():
     start = timeline_event['s'] - self.start_time
     end = timeline_event['e'] - self.start_time
     if end > start:
+      elapsed = end - start
       thread = timeline_event['t']
       name = self.event_name_lookup[timeline_event['n']]
+
+      # Keep track of periods on the main thread where at least 500ms are available with no tasks longer than 50ms
+      if 'main_thread' in self.cpu and thread == self.cpu['main_thread']:
+        if elapsed > 50000:
+          if start - self.interactive_start > 500000:
+            self.interactive.append([int(math.ceil(self.interactive_start / 1000.0)), int(math.floor(start / 1000.0))])
+          self.interactive_start = end
+          self.interactive_end = None
+        else:
+          self.interactive_end = end
+
+      if 'js' in timeline_event:
+        script = timeline_event['js']
+        s = start / 1000.0
+        e = end / 1000.0
+        if self.scripts is None:
+          self.scripts = {}
+        if 'main_thread' not in self.scripts and 'main_thread' in self.cpu:
+          self.scripts['main_thread'] = self.cpu['main_thread']
+        if thread not in self.scripts:
+          self.scripts[thread] = {}
+        if script not in self.scripts[thread]:
+          self.scripts[thread][script] = {}
+        if name not in self.scripts[thread][script]:
+          self.scripts[thread][script][name] = []
+        # make sure the script duration isn't already covered by a parent event
+        new_duration = True
+        if len(self.scripts[thread][script][name]):
+          for period in self.scripts[thread][script][name]:
+            if s >= period[0] and e <= period[1]:
+              new_duration = False
+              break
+        if new_duration:
+          self.scripts[thread][script][name].append([s, e])
 
       slice_usecs = self.cpu['slice_usecs']
       first_slice = int(float(start) / float(slice_usecs))
@@ -262,22 +400,23 @@ class Trace():
       # since they would just cancel each other out.
       if name != parent:
         fraction = min(1.0, float(elapsed) / float(self.cpu['slice_usecs']))
-        self.cpu['slices'][thread][name][slice_number] = self.cpu['slices'][thread][name][slice_number] + fraction
-        if parent is not None:
-          parentTime = self.cpu['slices'][thread][parent][slice_number]
-          if parentTime >= fraction:
-            parentTime = max(0.0, parentTime - fraction)
-            self.cpu['slices'][thread][parent][slice_number] = parentTime
+        self.cpu['slices'][thread][name][slice_number] += fraction
+        self.cpu['slices'][thread]['total'][slice_number] += fraction
+        if parent is not None and self.cpu['slices'][thread][parent][slice_number] >= fraction:
+          self.cpu['slices'][thread][parent][slice_number] -= fraction
+          self.cpu['slices'][thread]['total'][slice_number] -= fraction
         # Make sure we didn't exceed 100% in this slice
         self.cpu['slices'][thread][name][slice_number] = min(1.0, self.cpu['slices'][thread][name][slice_number])
 
         # make sure we don't exceed 100% for any slot
-        available = max(0.0, 1.0 - fraction)
-        for slice_name in self.cpu['slices'][thread].keys():
-          if slice_name != name:
-            self.cpu['slices'][thread][slice_name][slice_number] =\
-              min(self.cpu['slices'][thread][slice_name][slice_number], available)
-            available = max(0.0, available - self.cpu['slices'][thread][slice_name][slice_number])
+        if self.cpu['slices'][thread]['total'][slice_number] > 1.0:
+          available = max(0.0, 1.0 - fraction)
+          for slice_name in self.cpu['slices'][thread].keys():
+            if slice_name != name:
+              self.cpu['slices'][thread][slice_name][slice_number] =\
+                min(self.cpu['slices'][thread][slice_name][slice_number], available)
+              available = max(0.0, available - self.cpu['slices'][thread][slice_name][slice_number])
+          self.cpu['slices'][thread]['total'][slice_number] = min(1.0, max(0.0, 1.0 - available))
     except:
       pass
 
@@ -285,12 +424,11 @@ class Trace():
   #   Blink Features
   ########################################################################################################################
   def ProcessFeatureUsageEvent(self, trace_event):
-    global BLINK_CSS_FEATURES
     global BLINK_FEATURES
     if 'name' in trace_event and\
             'args' in trace_event and\
             'feature' in trace_event['args'] and\
-        (trace_event['name'] == 'FeatureFirstUsed' or trace_event['name'] == 'CSSFeatureFirstUsed'):
+        (trace_event['name'] == 'FeatureFirstUsed' or trace_event['name'] == 'CSSFirstUsed'):
       if self.feature_usage is None:
         self.feature_usage = {'Features': {}, 'CSSFeatures': {}}
       if self.feature_usage_start_time is None:
@@ -307,9 +445,9 @@ class Trace():
           name = 'Feature_{0}'.format(id)
         if name not in self.feature_usage['Features']:
           self.feature_usage['Features'][name] = timestamp
-      elif trace_event['name'] == 'CSSFeatureFirstUsed':
-        if id in BLINK_CSS_FEATURES:
-          name = BLINK_CSS_FEATURES[id]
+      elif trace_event['name'] == 'CSSFirstUsed':
+        if id in CSS_FEATURES:
+          name = CSS_FEATURES[id]
         else:
           name = 'CSSFeature_{0}'.format(id)
         if name not in self.feature_usage['CSSFeatures']:
@@ -390,11 +528,14 @@ def main():
   parser.add_argument('-v', '--verbose', action='count',
                       help="Increase verbosity (specify multiple times for more). -vvvv for full debug output.")
   parser.add_argument('-t', '--trace', help="Input trace file.")
+  parser.add_argument('-l', '--timeline', help="Input timeline file (iOS or really old Chrome).")
   parser.add_argument('-c', '--cpu', help="Output CPU time slices file.")
+  parser.add_argument('-j', '--js', help="Output Javascript per-script parse/evaluate/execute timings.")
   parser.add_argument('-u', '--user', help="Output user timing file.")
   parser.add_argument('-f', '--features', help="Output blink feature usage file.")
+  parser.add_argument('-i', '--interactive', help="Output list of interactive times.")
   parser.add_argument('-n', '--netlog', help="Output netlog details file.")
-  options = parser.parse_args()
+  options, unknown = parser.parse_known_args()
 
   # Set up logging
   log_level = logging.CRITICAL
@@ -408,12 +549,15 @@ def main():
     log_level = logging.DEBUG
   logging.basicConfig(level=log_level, format="%(asctime)s.%(msecs)03d - %(message)s", datefmt="%H:%M:%S")
 
-  if not options.trace:
-    parser.error("Input trace file is not specified.")
+  if not options.trace and not options.timeline:
+    parser.error("Input trace or timeline file is not specified.")
 
   start = time.time()
   trace = Trace()
-  trace.Process(options.trace)
+  if options.trace:
+    trace.Process(options.trace)
+  elif options.timeline:
+    trace.ProcessTimeline(options.timeline)
 
   if options.user:
     trace.WriteUserTiming(options.user)
@@ -421,8 +565,14 @@ def main():
   if options.cpu:
     trace.WriteCPUSlices(options.cpu)
 
+  if options.js:
+    trace.WriteScriptTimings(options.js)
+
   if options.features:
     trace.WriteFeatureUsage(options.features)
+
+  if options.interactive:
+    trace.WriteInteractive(options.interactive)
 
   if options.netlog:
     trace.WriteNetlog(options.netlog)
@@ -1603,485 +1753,709 @@ BLINK_FEATURES = {
   "1498": "ChromeLoadTimesConnectionInfo",
   "1499": "ChromeLoadTimesUnknown",
   "1500": "SVGViewElement",
-  "1501": "WebShareShare"
+  "1501": "WebShareShare",
+  "1502": "AuxclickAddListenerCount",
+  "1503": "HTMLCanvasElement",
+  "1504": "SVGSMILAnimationElementTiming",
+  "1505": "SVGSMILBeginEndAnimationElement",
+  "1506": "SVGSMILPausing",
+  "1507": "SVGSMILCurrentTime",
+  "1508": "HTMLBodyElementOnSelectionChangeAttribute",
+  "1509": "ForeignFetchInterception",
+  "1510": "MapNameMatchingStrict",
+  "1511": "MapNameMatchingASCIICaseless",
+  "1512": "MapNameMatchingUnicodeLower",
+  "1513": "RadioNameMatchingStrict",
+  "1514": "RadioNameMatchingASCIICaseless",
+  "1515": "RadioNameMatchingCaseFolding",
+  "1517": "InputSelectionGettersThrow",
+  "1519": "UsbGetDevices",
+  "1520": "UsbRequestDevice",
+  "1521": "UsbDeviceOpen",
+  "1522": "UsbDeviceClose",
+  "1523": "UsbDeviceSelectConfiguration",
+  "1524": "UsbDeviceClaimInterface",
+  "1525": "UsbDeviceReleaseInterface",
+  "1526": "UsbDeviceSelectAlternateInterface",
+  "1527": "UsbDeviceControlTransferIn",
+  "1528": "UsbDeviceControlTransferOut",
+  "1529": "UsbDeviceClearHalt",
+  "1530": "UsbDeviceTransferIn",
+  "1531": "UsbDeviceTransferOut",
+  "1532": "UsbDeviceIsochronousTransferIn",
+  "1533": "UsbDeviceIsochronousTransferOut",
+  "1534": "UsbDeviceReset",
+  "1535": "PointerEnterLeaveFired",
+  "1536": "PointerOverOutFired",
+  "1539": "DraggableAttribute",
+  "1540": "CleanScriptElementWithNonce",
+  "1541": "PotentiallyInjectedScriptElementWithNonce",
+  "1542": "PendingStylesheetAddedAfterBodyStarted",
+  "1543": "UntrustedMouseDownEventDispatchedToSelect",
+  "1544": "BlockedSniffingAudioToScript",
+  "1545": "BlockedSniffingVideoToScript",
+  "1546": "BlockedSniffingCSVToScript",
+  "1547": "MetaSetCookie",
+  "1548": "MetaRefresh",
+  "1549": "MetaSetCookieWhenCSPBlocksInlineScript",
+  "1550": "MetaRefreshWhenCSPBlocksInlineScript",
+  "1551": "MiddleClickAutoscrollStart",
+  "1552": "ClipCssOfFixedPositionElement",
+  "1553": "RTCPeerConnectionCreateOfferOptionsOfferToReceive",
+  "1554": "DragAndDropScrollStart",
+  "1555": "PresentationConnectionListConnectionAvailableEventListener",
+  "1556": "WebAudioAutoplayCrossOriginIframe",
+  "1557": "ScriptInvalidTypeOrLanguage",
+  "1558": "VRGetDisplays",
+  "1559": "VRPresent",
+  "1560": "VRDeprecatedGetPose",
+  "1561": "WebAudioAnalyserNode",
+  "1562": "WebAudioAudioBuffer",
+  "1563": "WebAudioAudioBufferSourceNode",
+  "1564": "WebAudioBiquadFilterNode",
+  "1565": "WebAudioChannelMergerNode",
+  "1566": "WebAudioChannelSplitterNode",
+  "1567": "WebAudioConvolverNode",
+  "1568": "WebAudioDelayNode",
+  "1569": "WebAudioDynamicsCompressorNode",
+  "1570": "WebAudioGainNode",
+  "1571": "WebAudioIIRFilterNode",
+  "1572": "WebAudioMediaElementAudioSourceNode",
+  "1573": "WebAudioOscillatorNode",
+  "1574": "WebAudioPannerNode",
+  "1575": "WebAudioPeriodicWave",
+  "1576": "WebAudioStereoPannerNode",
+  "1577": "WebAudioWaveShaperNode",
+  "1578": "CSSZoomReset",
+  "1579": "CSSZoomDocument",
+  "1580": "PaymentAddressCareOf",
+  "1581": "XSSAuditorBlockedScript",
+  "1582": "XSSAuditorBlockedEntirePage",
+  "1583": "XSSAuditorDisabled",
+  "1584": "XSSAuditorEnabledFilter",
+  "1585": "XSSAuditorEnabledBlock",
+  "1586": "XSSAuditorInvalid",
+  "1587": "SVGCursorElement",
+  "1588": "SVGCursorElementHasClient",
+  "1589": "TextInputEventOnInput",
+  "1590": "TextInputEventOnTextArea",
+  "1591": "TextInputEventOnContentEditable",
+  "1592": "TextInputEventOnNotNode",
+  "1593": "WebkitBeforeTextInsertedOnInput",
+  "1594": "WebkitBeforeTextInsertedOnTextArea",
+  "1595": "WebkitBeforeTextInsertedOnContentEditable",
+  "1596": "WebkitBeforeTextInsertedOnNotNode",
+  "1597": "WebkitEditableContentChangedOnInput",
+  "1598": "WebkitEditableContentChangedOnTextArea",
+  "1599": "WebkitEditableContentChangedOnContentEditable",
+  "1600": "WebkitEditableContentChangedOnNotNode",
+  "1601": "V8NavigatorUserMediaError_ConstraintName_AttributeGetter",
+  "1602": "V8HTMLMediaElement_SrcObject_AttributeGetter",
+  "1603": "V8HTMLMediaElement_SrcObject_AttributeSetter",
+  "1604": "CreateObjectURLBlob",
+  "1605": "CreateObjectURLMediaSource",
+  "1606": "CreateObjectURLMediaStream",
+  "1607": "DocumentCreateTouchWindowNull",
+  "1608": "DocumentCreateTouchWindowWrongType",
+  "1609": "DocumentCreateTouchTargetNull",
+  "1610": "DocumentCreateTouchTargetWrongType",
+  "1611": "DocumentCreateTouchLessThanSevenArguments",
+  "1612": "DocumentCreateTouchMoreThanSevenArguments",
+  "1613": "EncryptedMediaCapabilityProvided",
+  "1614": "EncryptedMediaCapabilityNotProvided",
+  "1615": "LongTaskObserver",
+  "1616": "CSSMotionInEffect",
+  "1617": "CSSOffsetInEffect",
+  "1618": "VRGetDisplaysInsecureOrigin",
+  "1619": "VRRequestPresent",
+  "1620": "VRRequestPresentInsecureOrigin",
+  "1621": "VRDeprecatedFieldOfView",
+  "1622": "VideoInCanvas",
+  "1623": "HiddenAutoplayedVideoInCanvas",
+  "1624": "OffscreenCanvas",
+  "1625": "GamepadPose",
+  "1626": "GamepadHand",
+  "1627": "GamepadDisplayId",
+  "1628": "GamepadButtonTouched",
+  "1629": "GamepadPoseHasOrientation",
+  "1630": "GamepadPoseHasPosition",
+  "1631": "GamepadPosePosition",
+  "1632": "GamepadPoseLinearVelocity",
+  "1633": "GamepadPoseLinearAcceleration",
+  "1634": "GamepadPoseOrientation",
+  "1635": "GamepadPoseAngularVelocity",
+  "1636": "GamepadPoseAngularAcceleration",
+  "1638": "V8RTCDataChannel_MaxRetransmitTime_AttributeGetter",
+  "1639": "V8RTCDataChannel_MaxRetransmits_AttributeGetter",
+  "1640": "V8RTCDataChannel_Reliable_AttributeGetter",
+  "1641": "V8RTCPeerConnection_AddStream_Method",
+  "1642": "V8RTCPeerConnection_CreateDTMFSender_Method",
+  "1643": "V8RTCPeerConnection_GetLocalStreams_Method",
+  "1644": "V8RTCPeerConnection_GetRemoteStreams_Method",
+  "1645": "V8RTCPeerConnection_GetStreamById_Method",
+  "1646": "V8RTCPeerConnection_RemoveStream_Method",
+  "1647": "V8RTCPeerConnection_UpdateIce_Method",
+  "1648": "RTCPeerConnectionCreateDataChannelMaxRetransmitTime",
+  "1649": "RTCPeerConnectionCreateDataChannelMaxRetransmits",
+  "1650": "AudioContextCreateConstantSource",
+  "1651": "WebAudioConstantSourceNode",
+  "1652": "LoopbackEmbeddedInSecureContext",
+  "1653": "LoopbackEmbeddedInNonSecureContext",
+  "1654": "BlinkMacSystemFont",
+  "1655": "RTCConfigurationIceTransportsNone",
+  "1656": "RTCIceServerURL",
+  "1657": "RTCIceServerURLs",
+  "1658": "OffscreenCanvasTransferToImageBitmap2D",
+  "1659": "OffscreenCanvasTransferToImageBitmapWebGL",
+  "1660": "OffscreenCanvasCommit2D",
+  "1661": "OffscreenCanvasCommitWebGL",
+  "1662": "RTCConfigurationIceTransportPolicy",
+  "1663": "RTCConfigurationIceTransportPolicyNone",
+  "1664": "RTCConfigurationIceTransports",
+  "1665": "DocumentFullscreenElementInV0Shadow",
+  "1666": "ScriptWithCSPBypassingSchemeParserInserted",
+  "1667": "ScriptWithCSPBypassingSchemeNotParserInserted",
+  "1668": "DocumentCreateElement2ndArgStringHandling",
+  "1669": "V8MediaRecorder_Start_Method",
+  "1670": "WebBluetoothRequestDevice",
+  "1671": "UnitlessPerspectiveInPerspectiveProperty",
+  "1672": "UnitlessPerspectiveInTransformProperty",
+  "1673": "V8RTCSessionDescription_Type_AttributeGetter",
+  "1674": "V8RTCSessionDescription_Type_AttributeSetter",
+  "1675": "V8RTCSessionDescription_Sdp_AttributeGetter",
+  "1676": "V8RTCSessionDescription_Sdp_AttributeSetter",
+  "1677": "RTCSessionDescriptionInitNoType",
+  "1678": "RTCSessionDescriptionInitNoSdp",
+  "1679": "HTMLMediaElementPreloadForcedMetadata",
+  "1680": "GenericSensorStart",
+  "1681": "GenericSensorStop",
+  "1682": "TouchEventPreventedNoTouchAction",
+  "1683": "TouchEventPreventedForcedDocumentPassiveNoTouchAction",
+  "1684": "V8Event_StopPropagation_Method",
+  "1685": "V8Event_StopImmediatePropagation_Method",
+  "1686": "ImageCaptureConstructor",
+  "1687": "V8Document_RootScroller_AttributeGetter",
+  "1688": "V8Document_RootScroller_AttributeSetter",
+  "1689": "CustomElementRegistryDefine",
+  "1690": "LinkHeaderServiceWorker",
+  "1691": "CSSShadowPiercingDescendantCombinator",
+  "1692": "CSSFlexibleBox",
+  "1693": "CSSGridLayout",
+  "1694": "V8BarcodeDetector_Detect_Method",
+  "1695": "V8FaceDetector_Detect_Method"
 }
 
 ########################################################################################################################
-#   Blink CSS feature names from https://cs.chromium.org/chromium/src/out/Debug/gen/blink/core/CSSPropertyNames.h
+#   CSS feature names from https://cs.chromium.org/chromium/src/third_party/WebKit/Source/core/frame/UseCounter.cpp
 ########################################################################################################################
-BLINK_CSS_FEATURES = {
-  "1": "CSSPropertyApplyAtRule",
-  "2": "CSSPropertyVariable",
-  "3": "CSSPropertyColor",
-  "4": "CSSPropertyDirection",
-  "5": "CSSPropertyFontFamily",
-  "6": "CSSPropertyFontKerning",
+CSS_FEATURES = {
+  "2": "CSSPropertyColor",
+  "3": "CSSPropertyDirection",
+  "4": "CSSPropertyDisplay",
+  "5": "CSSPropertyFont",
+  "6": "CSSPropertyFontFamily",
   "7": "CSSPropertyFontSize",
-  "8": "CSSPropertyFontSizeAdjust",
-  "9": "CSSPropertyFontStretch",
-  "10": "CSSPropertyFontStyle",
-  "11": "CSSPropertyFontVariantLigatures",
-  "12": "CSSPropertyFontVariantCaps",
-  "13": "CSSPropertyFontVariantNumeric",
-  "14": "CSSPropertyFontWeight",
-  "15": "CSSPropertyFontFeatureSettings",
-  "16": "CSSPropertyWebkitFontSmoothing",
-  "17": "CSSPropertyWebkitLocale",
-  "18": "CSSPropertyTextOrientation",
-  "19": "CSSPropertyWebkitTextOrientation",
-  "20": "CSSPropertyWritingMode",
-  "21": "CSSPropertyWebkitWritingMode",
-  "22": "CSSPropertyTextRendering",
-  "23": "CSSPropertyZoom",
-  "24": "CSSPropertyAlignContent",
-  "25": "CSSPropertyAlignItems",
-  "26": "CSSPropertyAlignmentBaseline",
-  "27": "CSSPropertyAlignSelf",
-  "28": "CSSPropertyAnimationDelay",
-  "29": "CSSPropertyAnimationDirection",
-  "30": "CSSPropertyAnimationDuration",
-  "31": "CSSPropertyAnimationFillMode",
-  "32": "CSSPropertyAnimationIterationCount",
-  "33": "CSSPropertyAnimationName",
-  "34": "CSSPropertyAnimationPlayState",
-  "35": "CSSPropertyAnimationTimingFunction",
-  "36": "CSSPropertyBackdropFilter",
-  "37": "CSSPropertyBackfaceVisibility",
-  "38": "CSSPropertyBackgroundAttachment",
-  "39": "CSSPropertyBackgroundBlendMode",
-  "40": "CSSPropertyBackgroundClip",
-  "41": "CSSPropertyBackgroundColor",
-  "42": "CSSPropertyBackgroundImage",
-  "43": "CSSPropertyBackgroundOrigin",
-  "44": "CSSPropertyBackgroundPositionX",
-  "45": "CSSPropertyBackgroundPositionY",
-  "46": "CSSPropertyBackgroundRepeatX",
-  "47": "CSSPropertyBackgroundRepeatY",
-  "48": "CSSPropertyBackgroundSize",
-  "49": "CSSPropertyBaselineShift",
-  "50": "CSSPropertyBorderBottomColor",
-  "51": "CSSPropertyBorderBottomLeftRadius",
-  "52": "CSSPropertyBorderBottomRightRadius",
-  "53": "CSSPropertyBorderBottomStyle",
-  "54": "CSSPropertyBorderBottomWidth",
-  "55": "CSSPropertyBorderCollapse",
-  "56": "CSSPropertyBorderImageOutset",
-  "57": "CSSPropertyBorderImageRepeat",
-  "58": "CSSPropertyBorderImageSlice",
-  "59": "CSSPropertyBorderImageSource",
-  "60": "CSSPropertyBorderImageWidth",
-  "61": "CSSPropertyBorderLeftColor",
-  "62": "CSSPropertyBorderLeftStyle",
-  "63": "CSSPropertyBorderLeftWidth",
-  "64": "CSSPropertyBorderRightColor",
-  "65": "CSSPropertyBorderRightStyle",
-  "66": "CSSPropertyBorderRightWidth",
-  "67": "CSSPropertyBorderTopColor",
-  "68": "CSSPropertyBorderTopLeftRadius",
-  "69": "CSSPropertyBorderTopRightRadius",
-  "70": "CSSPropertyBorderTopStyle",
-  "71": "CSSPropertyBorderTopWidth",
-  "72": "CSSPropertyBottom",
-  "73": "CSSPropertyBoxShadow",
-  "74": "CSSPropertyBoxSizing",
-  "75": "CSSPropertyBreakAfter",
-  "76": "CSSPropertyBreakBefore",
-  "77": "CSSPropertyBreakInside",
-  "78": "CSSPropertyBufferedRendering",
-  "79": "CSSPropertyCaptionSide",
-  "80": "CSSPropertyClear",
-  "81": "CSSPropertyClip",
-  "82": "CSSPropertyClipPath",
-  "83": "CSSPropertyClipRule",
-  "84": "CSSPropertyColorInterpolation",
-  "85": "CSSPropertyColorInterpolationFilters",
-  "86": "CSSPropertyColorRendering",
-  "87": "CSSPropertyColumnFill",
-  "88": "CSSPropertyContain",
-  "89": "CSSPropertyContent",
-  "90": "CSSPropertyCounterIncrement",
-  "91": "CSSPropertyCounterReset",
-  "92": "CSSPropertyCursor",
-  "93": "CSSPropertyCx",
-  "94": "CSSPropertyCy",
-  "95": "CSSPropertyD",
-  "96": "CSSPropertyDisplay",
-  "97": "CSSPropertyDominantBaseline",
-  "98": "CSSPropertyEmptyCells",
-  "99": "CSSPropertyFill",
-  "100": "CSSPropertyFillOpacity",
-  "101": "CSSPropertyFillRule",
-  "102": "CSSPropertyFilter",
-  "103": "CSSPropertyFlexBasis",
-  "104": "CSSPropertyFlexDirection",
-  "105": "CSSPropertyFlexGrow",
-  "106": "CSSPropertyFlexShrink",
-  "107": "CSSPropertyFlexWrap",
-  "108": "CSSPropertyFloat",
-  "109": "CSSPropertyFloodColor",
-  "110": "CSSPropertyFloodOpacity",
-  "111": "CSSPropertyGridAutoColumns",
-  "112": "CSSPropertyGridAutoFlow",
-  "113": "CSSPropertyGridAutoRows",
-  "114": "CSSPropertyGridColumnEnd",
-  "115": "CSSPropertyGridColumnGap",
-  "116": "CSSPropertyGridColumnStart",
-  "117": "CSSPropertyGridRowEnd",
-  "118": "CSSPropertyGridRowGap",
-  "119": "CSSPropertyGridRowStart",
-  "120": "CSSPropertyGridTemplateAreas",
-  "121": "CSSPropertyGridTemplateColumns",
-  "122": "CSSPropertyGridTemplateRows",
-  "123": "CSSPropertyHeight",
-  "124": "CSSPropertyHyphens",
-  "125": "CSSPropertyImageRendering",
-  "126": "CSSPropertyImageOrientation",
-  "127": "CSSPropertyIsolation",
-  "128": "CSSPropertyJustifyContent",
-  "129": "CSSPropertyJustifyItems",
-  "130": "CSSPropertyJustifySelf",
-  "131": "CSSPropertyLeft",
-  "132": "CSSPropertyLetterSpacing",
-  "133": "CSSPropertyLightingColor",
-  "134": "CSSPropertyLineHeight",
-  "135": "CSSPropertyListStyleImage",
-  "136": "CSSPropertyListStylePosition",
-  "137": "CSSPropertyListStyleType",
-  "138": "CSSPropertyMarginBottom",
-  "139": "CSSPropertyMarginLeft",
-  "140": "CSSPropertyMarginRight",
-  "141": "CSSPropertyMarginTop",
-  "142": "CSSPropertyMarkerEnd",
-  "143": "CSSPropertyMarkerMid",
-  "144": "CSSPropertyMarkerStart",
-  "145": "CSSPropertyMask",
-  "146": "CSSPropertyMaskSourceType",
-  "147": "CSSPropertyMaskType",
-  "148": "CSSPropertyMaxHeight",
-  "149": "CSSPropertyMaxWidth",
-  "150": "CSSPropertyMinHeight",
-  "151": "CSSPropertyMinWidth",
-  "152": "CSSPropertyMixBlendMode",
-  "153": "CSSPropertyMotionOffset",
-  "154": "CSSPropertyMotionPath",
-  "155": "CSSPropertyMotionRotation",
-  "156": "CSSPropertyObjectFit",
-  "157": "CSSPropertyObjectPosition",
-  "158": "CSSPropertyOpacity",
-  "159": "CSSPropertyOrder",
-  "160": "CSSPropertyOrphans",
-  "161": "CSSPropertyOutlineColor",
-  "162": "CSSPropertyOutlineOffset",
-  "163": "CSSPropertyOutlineStyle",
-  "164": "CSSPropertyOutlineWidth",
-  "165": "CSSPropertyOverflowAnchor",
-  "166": "CSSPropertyOverflowWrap",
-  "167": "CSSPropertyOverflowX",
-  "168": "CSSPropertyOverflowY",
-  "169": "CSSPropertyPaddingBottom",
-  "170": "CSSPropertyPaddingLeft",
-  "171": "CSSPropertyPaddingRight",
-  "172": "CSSPropertyPaddingTop",
-  "173": "CSSPropertyPaintOrder",
-  "174": "CSSPropertyPerspective",
-  "175": "CSSPropertyPerspectiveOrigin",
-  "176": "CSSPropertyPointerEvents",
-  "177": "CSSPropertyPosition",
-  "178": "CSSPropertyQuotes",
-  "179": "CSSPropertyResize",
-  "180": "CSSPropertyRight",
-  "181": "CSSPropertyR",
-  "182": "CSSPropertyRx",
-  "183": "CSSPropertyRy",
-  "184": "CSSPropertyScrollBehavior",
-  "185": "CSSPropertyScrollSnapType",
-  "186": "CSSPropertyScrollSnapPointsX",
-  "187": "CSSPropertyScrollSnapPointsY",
-  "188": "CSSPropertyScrollSnapDestination",
-  "189": "CSSPropertyScrollSnapCoordinate",
-  "190": "CSSPropertyShapeImageThreshold",
-  "191": "CSSPropertyShapeMargin",
-  "192": "CSSPropertyShapeOutside",
-  "193": "CSSPropertyShapeRendering",
-  "194": "CSSPropertySize",
-  "195": "CSSPropertySnapHeight",
-  "196": "CSSPropertySpeak",
-  "197": "CSSPropertyStopColor",
-  "198": "CSSPropertyStopOpacity",
-  "199": "CSSPropertyStroke",
-  "200": "CSSPropertyStrokeDasharray",
-  "201": "CSSPropertyStrokeDashoffset",
-  "202": "CSSPropertyStrokeLinecap",
-  "203": "CSSPropertyStrokeLinejoin",
-  "204": "CSSPropertyStrokeMiterlimit",
-  "205": "CSSPropertyStrokeOpacity",
-  "206": "CSSPropertyStrokeWidth",
-  "207": "CSSPropertyTableLayout",
-  "208": "CSSPropertyTabSize",
-  "209": "CSSPropertyTextAlign",
-  "210": "CSSPropertyTextAlignLast",
-  "211": "CSSPropertyTextAnchor",
-  "212": "CSSPropertyTextCombineUpright",
-  "213": "CSSPropertyTextDecoration",
-  "214": "CSSPropertyTextDecorationColor",
-  "215": "CSSPropertyTextDecorationLine",
-  "216": "CSSPropertyTextDecorationStyle",
-  "217": "CSSPropertyTextIndent",
-  "218": "CSSPropertyTextJustify",
-  "219": "CSSPropertyTextOverflow",
-  "220": "CSSPropertyTextShadow",
-  "221": "CSSPropertyTextSizeAdjust",
-  "222": "CSSPropertyTextTransform",
-  "223": "CSSPropertyTextUnderlinePosition",
-  "224": "CSSPropertyTop",
-  "225": "CSSPropertyTouchAction",
-  "226": "CSSPropertyTransform",
-  "227": "CSSPropertyTransformOrigin",
-  "228": "CSSPropertyTransformStyle",
-  "229": "CSSPropertyTranslate",
-  "230": "CSSPropertyRotate",
-  "231": "CSSPropertyScale",
-  "232": "CSSPropertyTransitionDelay",
-  "233": "CSSPropertyTransitionDuration",
-  "234": "CSSPropertyTransitionProperty",
-  "235": "CSSPropertyTransitionTimingFunction",
-  "236": "CSSPropertyUnicodeBidi",
-  "237": "CSSPropertyVectorEffect",
-  "238": "CSSPropertyVerticalAlign",
-  "239": "CSSPropertyVisibility",
-  "240": "CSSPropertyX",
-  "241": "CSSPropertyY",
-  "242": "CSSPropertyWebkitAppearance",
-  "243": "CSSPropertyWebkitAppRegion",
-  "244": "CSSPropertyWebkitBackgroundClip",
-  "245": "CSSPropertyWebkitBackgroundOrigin",
-  "246": "CSSPropertyWebkitBorderHorizontalSpacing",
-  "247": "CSSPropertyWebkitBorderImage",
-  "248": "CSSPropertyWebkitBorderVerticalSpacing",
-  "249": "CSSPropertyWebkitBoxAlign",
-  "250": "CSSPropertyWebkitBoxDecorationBreak",
-  "251": "CSSPropertyWebkitBoxDirection",
-  "252": "CSSPropertyWebkitBoxFlex",
-  "253": "CSSPropertyWebkitBoxFlexGroup",
-  "254": "CSSPropertyWebkitBoxLines",
-  "255": "CSSPropertyWebkitBoxOrdinalGroup",
-  "256": "CSSPropertyWebkitBoxOrient",
-  "257": "CSSPropertyWebkitBoxPack",
-  "258": "CSSPropertyWebkitBoxReflect",
-  "259": "CSSPropertyWebkitClipPath",
-  "260": "CSSPropertyColumnCount",
-  "261": "CSSPropertyColumnGap",
-  "262": "CSSPropertyColumnRuleColor",
-  "263": "CSSPropertyColumnRuleStyle",
-  "264": "CSSPropertyColumnRuleWidth",
-  "265": "CSSPropertyColumnSpan",
-  "266": "CSSPropertyColumnWidth",
-  "267": "CSSPropertyWebkitHighlight",
-  "268": "CSSPropertyWebkitHyphenateCharacter",
-  "269": "CSSPropertyWebkitLineBreak",
-  "270": "CSSPropertyWebkitLineClamp",
-  "271": "CSSPropertyWebkitMarginAfterCollapse",
-  "272": "CSSPropertyWebkitMarginBeforeCollapse",
-  "273": "CSSPropertyWebkitMarginBottomCollapse",
-  "274": "CSSPropertyWebkitMarginTopCollapse",
-  "275": "CSSPropertyWebkitMaskBoxImageOutset",
-  "276": "CSSPropertyWebkitMaskBoxImageRepeat",
-  "277": "CSSPropertyWebkitMaskBoxImageSlice",
-  "278": "CSSPropertyWebkitMaskBoxImageSource",
-  "279": "CSSPropertyWebkitMaskBoxImageWidth",
-  "280": "CSSPropertyWebkitMaskClip",
-  "281": "CSSPropertyWebkitMaskComposite",
-  "282": "CSSPropertyWebkitMaskImage",
-  "283": "CSSPropertyWebkitMaskOrigin",
-  "284": "CSSPropertyWebkitMaskPositionX",
-  "285": "CSSPropertyWebkitMaskPositionY",
-  "286": "CSSPropertyWebkitMaskRepeatX",
-  "287": "CSSPropertyWebkitMaskRepeatY",
-  "288": "CSSPropertyWebkitMaskSize",
-  "289": "CSSPropertyWebkitPerspectiveOriginX",
-  "290": "CSSPropertyWebkitPerspectiveOriginY",
-  "291": "CSSPropertyWebkitPrintColorAdjust",
-  "292": "CSSPropertyWebkitRtlOrdering",
-  "293": "CSSPropertyWebkitRubyPosition",
-  "294": "CSSPropertyWebkitTapHighlightColor",
-  "295": "CSSPropertyWebkitTextCombine",
-  "296": "CSSPropertyWebkitTextEmphasisColor",
-  "297": "CSSPropertyWebkitTextEmphasisPosition",
-  "298": "CSSPropertyWebkitTextEmphasisStyle",
-  "299": "CSSPropertyWebkitTextFillColor",
-  "300": "CSSPropertyWebkitTextSecurity",
-  "301": "CSSPropertyWebkitTextStrokeColor",
-  "302": "CSSPropertyWebkitTextStrokeWidth",
-  "303": "CSSPropertyWebkitTransformOriginX",
-  "304": "CSSPropertyWebkitTransformOriginY",
-  "305": "CSSPropertyWebkitTransformOriginZ",
-  "306": "CSSPropertyWebkitUserDrag",
-  "307": "CSSPropertyWebkitUserModify",
-  "308": "CSSPropertyWebkitUserSelect",
-  "309": "CSSPropertyWhiteSpace",
-  "310": "CSSPropertyWidows",
-  "311": "CSSPropertyWidth",
-  "312": "CSSPropertyWillChange",
-  "313": "CSSPropertyWordBreak",
-  "314": "CSSPropertyWordSpacing",
-  "315": "CSSPropertyWordWrap",
-  "316": "CSSPropertyZIndex",
-  "317": "CSSPropertyWebkitBorderEndColor",
-  "318": "CSSPropertyWebkitBorderEndStyle",
-  "319": "CSSPropertyWebkitBorderEndWidth",
-  "320": "CSSPropertyWebkitBorderStartColor",
-  "321": "CSSPropertyWebkitBorderStartStyle",
-  "322": "CSSPropertyWebkitBorderStartWidth",
-  "323": "CSSPropertyWebkitBorderBeforeColor",
-  "324": "CSSPropertyWebkitBorderBeforeStyle",
-  "325": "CSSPropertyWebkitBorderBeforeWidth",
-  "326": "CSSPropertyWebkitBorderAfterColor",
-  "327": "CSSPropertyWebkitBorderAfterStyle",
-  "328": "CSSPropertyWebkitBorderAfterWidth",
-  "329": "CSSPropertyWebkitMarginEnd",
-  "330": "CSSPropertyWebkitMarginStart",
-  "331": "CSSPropertyWebkitMarginBefore",
-  "332": "CSSPropertyWebkitMarginAfter",
-  "333": "CSSPropertyWebkitPaddingEnd",
-  "334": "CSSPropertyWebkitPaddingStart",
-  "335": "CSSPropertyWebkitPaddingBefore",
-  "336": "CSSPropertyWebkitPaddingAfter",
-  "337": "CSSPropertyWebkitLogicalWidth",
-  "338": "CSSPropertyWebkitLogicalHeight",
-  "339": "CSSPropertyWebkitMinLogicalWidth",
-  "340": "CSSPropertyWebkitMinLogicalHeight",
-  "341": "CSSPropertyWebkitMaxLogicalWidth",
-  "342": "CSSPropertyWebkitMaxLogicalHeight",
-  "343": "CSSPropertyAll",
-  "344": "CSSPropertyPage",
-  "345": "CSSPropertyWebkitFontSizeDelta",
-  "346": "CSSPropertyWebkitTextDecorationsInEffect",
-  "347": "CSSPropertyFontDisplay",
-  "348": "CSSPropertyMaxZoom",
-  "349": "CSSPropertyMinZoom",
-  "350": "CSSPropertyOrientation",
-  "351": "CSSPropertySrc",
-  "352": "CSSPropertyUnicodeRange",
-  "353": "CSSPropertyUserZoom",
-  "354": "CSSPropertyAnimation",
-  "355": "CSSPropertyBackground",
-  "356": "CSSPropertyBackgroundPosition",
-  "357": "CSSPropertyBackgroundRepeat",
-  "358": "CSSPropertyBorder",
-  "359": "CSSPropertyBorderBottom",
-  "360": "CSSPropertyBorderColor",
-  "361": "CSSPropertyBorderImage",
-  "362": "CSSPropertyBorderLeft",
-  "363": "CSSPropertyBorderRadius",
-  "364": "CSSPropertyBorderRight",
-  "365": "CSSPropertyBorderSpacing",
-  "366": "CSSPropertyBorderStyle",
-  "367": "CSSPropertyBorderTop",
-  "368": "CSSPropertyBorderWidth",
-  "369": "CSSPropertyFlex",
-  "370": "CSSPropertyFlexFlow",
-  "371": "CSSPropertyFont",
-  "372": "CSSPropertyFontVariant",
-  "373": "CSSPropertyGrid",
-  "374": "CSSPropertyGridArea",
-  "375": "CSSPropertyGridColumn",
-  "376": "CSSPropertyGridGap",
-  "377": "CSSPropertyGridRow",
-  "378": "CSSPropertyGridTemplate",
-  "379": "CSSPropertyListStyle",
-  "380": "CSSPropertyMargin",
-  "381": "CSSPropertyMarker",
-  "382": "CSSPropertyMotion",
-  "383": "CSSPropertyOutline",
-  "384": "CSSPropertyOverflow",
-  "385": "CSSPropertyPadding",
-  "386": "CSSPropertyPageBreakAfter",
-  "387": "CSSPropertyPageBreakBefore",
-  "388": "CSSPropertyPageBreakInside",
-  "389": "CSSPropertyTransition",
-  "390": "CSSPropertyWebkitBorderAfter",
-  "391": "CSSPropertyWebkitBorderBefore",
-  "392": "CSSPropertyWebkitBorderEnd",
-  "393": "CSSPropertyWebkitBorderStart",
-  "394": "CSSPropertyWebkitColumnBreakAfter",
-  "395": "CSSPropertyWebkitColumnBreakBefore",
-  "396": "CSSPropertyWebkitColumnBreakInside",
-  "397": "CSSPropertyColumnRule",
-  "398": "CSSPropertyColumns",
-  "399": "CSSPropertyWebkitMarginCollapse",
-  "400": "CSSPropertyWebkitMask",
-  "401": "CSSPropertyWebkitMaskBoxImage",
-  "402": "CSSPropertyWebkitMaskPosition",
-  "403": "CSSPropertyWebkitMaskRepeat",
-  "404": "CSSPropertyWebkitTextEmphasis",
-  "405": "CSSPropertyWebkitTextStroke",
-  "591": "CSSPropertyAliasEpubCaptionSide",
-  "807": "CSSPropertyAliasEpubTextCombine",
-  "916": "CSSPropertyAliasEpubTextEmphasis",
-  "808": "CSSPropertyAliasEpubTextEmphasisColor",
-  "810": "CSSPropertyAliasEpubTextEmphasisStyle",
-  "531": "CSSPropertyAliasEpubTextOrientation",
-  "734": "CSSPropertyAliasEpubTextTransform",
-  "825": "CSSPropertyAliasEpubWordBreak",
-  "533": "CSSPropertyAliasEpubWritingMode",
-  "536": "CSSPropertyAliasWebkitAlignContent",
-  "537": "CSSPropertyAliasWebkitAlignItems",
-  "539": "CSSPropertyAliasWebkitAlignSelf",
-  "866": "CSSPropertyAliasWebkitAnimation",
-  "540": "CSSPropertyAliasWebkitAnimationDelay",
-  "541": "CSSPropertyAliasWebkitAnimationDirection",
-  "542": "CSSPropertyAliasWebkitAnimationDuration",
-  "543": "CSSPropertyAliasWebkitAnimationFillMode",
-  "544": "CSSPropertyAliasWebkitAnimationIterationCount",
-  "545": "CSSPropertyAliasWebkitAnimationName",
-  "546": "CSSPropertyAliasWebkitAnimationPlayState",
-  "547": "CSSPropertyAliasWebkitAnimationTimingFunction",
-  "549": "CSSPropertyAliasWebkitBackfaceVisibility",
-  "560": "CSSPropertyAliasWebkitBackgroundSize",
-  "563": "CSSPropertyAliasWebkitBorderBottomLeftRadius",
-  "564": "CSSPropertyAliasWebkitBorderBottomRightRadius",
-  "875": "CSSPropertyAliasWebkitBorderRadius",
-  "580": "CSSPropertyAliasWebkitBorderTopLeftRadius",
-  "581": "CSSPropertyAliasWebkitBorderTopRightRadius",
-  "585": "CSSPropertyAliasWebkitBoxShadow",
-  "586": "CSSPropertyAliasWebkitBoxSizing",
-  "772": "CSSPropertyAliasWebkitColumnCount",
-  "773": "CSSPropertyAliasWebkitColumnGap",
-  "909": "CSSPropertyAliasWebkitColumnRule",
-  "774": "CSSPropertyAliasWebkitColumnRuleColor",
-  "775": "CSSPropertyAliasWebkitColumnRuleStyle",
-  "776": "CSSPropertyAliasWebkitColumnRuleWidth",
-  "777": "CSSPropertyAliasWebkitColumnSpan",
-  "778": "CSSPropertyAliasWebkitColumnWidth",
-  "910": "CSSPropertyAliasWebkitColumns",
-  "614": "CSSPropertyAliasWebkitFilter",
-  "881": "CSSPropertyAliasWebkitFlex",
-  "615": "CSSPropertyAliasWebkitFlexBasis",
-  "616": "CSSPropertyAliasWebkitFlexDirection",
-  "882": "CSSPropertyAliasWebkitFlexFlow",
-  "617": "CSSPropertyAliasWebkitFlexGrow",
-  "618": "CSSPropertyAliasWebkitFlexShrink",
-  "619": "CSSPropertyAliasWebkitFlexWrap",
-  "527": "CSSPropertyAliasWebkitFontFeatureSettings",
-  "640": "CSSPropertyAliasWebkitJustifyContent",
-  "670": "CSSPropertyAliasWebkitOpacity",
-  "671": "CSSPropertyAliasWebkitOrder",
-  "686": "CSSPropertyAliasWebkitPerspective",
-  "687": "CSSPropertyAliasWebkitPerspectiveOrigin",
-  "702": "CSSPropertyAliasWebkitShapeImageThreshold",
-  "703": "CSSPropertyAliasWebkitShapeMargin",
-  "704": "CSSPropertyAliasWebkitShapeOutside",
-  "733": "CSSPropertyAliasWebkitTextSizeAdjust",
-  "738": "CSSPropertyAliasWebkitTransform",
-  "739": "CSSPropertyAliasWebkitTransformOrigin",
-  "740": "CSSPropertyAliasWebkitTransformStyle",
-  "901": "CSSPropertyAliasWebkitTransition",
-  "744": "CSSPropertyAliasWebkitTransitionDelay",
-  "745": "CSSPropertyAliasWebkitTransitionDuration",
-  "746": "CSSPropertyAliasWebkitTransitionProperty",
-  "747": "CSSPropertyAliasWebkitTransitionTimingFunction"
+  "8": "CSSPropertyFontStyle",
+  "9": "CSSPropertyFontVariant",
+  "10": "CSSPropertyFontWeight",
+  "11": "CSSPropertyTextRendering",
+  "12": "CSSPropertyAliasWebkitFontFeatureSettings",
+  "13": "CSSPropertyFontKerning",
+  "14": "CSSPropertyWebkitFontSmoothing",
+  "15": "CSSPropertyFontVariantLigatures",
+  "16": "CSSPropertyWebkitLocale",
+  "17": "CSSPropertyWebkitTextOrientation",
+  "18": "CSSPropertyWebkitWritingMode",
+  "19": "CSSPropertyZoom",
+  "20": "CSSPropertyLineHeight",
+  "21": "CSSPropertyBackground",
+  "22": "CSSPropertyBackgroundAttachment",
+  "23": "CSSPropertyBackgroundClip",
+  "24": "CSSPropertyBackgroundColor",
+  "25": "CSSPropertyBackgroundImage",
+  "26": "CSSPropertyBackgroundOrigin",
+  "27": "CSSPropertyBackgroundPosition",
+  "28": "CSSPropertyBackgroundPositionX",
+  "29": "CSSPropertyBackgroundPositionY",
+  "30": "CSSPropertyBackgroundRepeat",
+  "31": "CSSPropertyBackgroundRepeatX",
+  "32": "CSSPropertyBackgroundRepeatY",
+  "33": "CSSPropertyBackgroundSize",
+  "34": "CSSPropertyBorder",
+  "35": "CSSPropertyBorderBottom",
+  "36": "CSSPropertyBorderBottomColor",
+  "37": "CSSPropertyBorderBottomLeftRadius",
+  "38": "CSSPropertyBorderBottomRightRadius",
+  "39": "CSSPropertyBorderBottomStyle",
+  "40": "CSSPropertyBorderBottomWidth",
+  "41": "CSSPropertyBorderCollapse",
+  "42": "CSSPropertyBorderColor",
+  "43": "CSSPropertyBorderImage",
+  "44": "CSSPropertyBorderImageOutset",
+  "45": "CSSPropertyBorderImageRepeat",
+  "46": "CSSPropertyBorderImageSlice",
+  "47": "CSSPropertyBorderImageSource",
+  "48": "CSSPropertyBorderImageWidth",
+  "49": "CSSPropertyBorderLeft",
+  "50": "CSSPropertyBorderLeftColor",
+  "51": "CSSPropertyBorderLeftStyle",
+  "52": "CSSPropertyBorderLeftWidth",
+  "53": "CSSPropertyBorderRadius",
+  "54": "CSSPropertyBorderRight",
+  "55": "CSSPropertyBorderRightColor",
+  "56": "CSSPropertyBorderRightStyle",
+  "57": "CSSPropertyBorderRightWidth",
+  "58": "CSSPropertyBorderSpacing",
+  "59": "CSSPropertyBorderStyle",
+  "60": "CSSPropertyBorderTop",
+  "61": "CSSPropertyBorderTopColor",
+  "62": "CSSPropertyBorderTopLeftRadius",
+  "63": "CSSPropertyBorderTopRightRadius",
+  "64": "CSSPropertyBorderTopStyle",
+  "65": "CSSPropertyBorderTopWidth",
+  "66": "CSSPropertyBorderWidth",
+  "67": "CSSPropertyBottom",
+  "68": "CSSPropertyBoxShadow",
+  "69": "CSSPropertyBoxSizing",
+  "70": "CSSPropertyCaptionSide",
+  "71": "CSSPropertyClear",
+  "72": "CSSPropertyClip",
+  "73": "CSSPropertyAliasWebkitClipPath",
+  "74": "CSSPropertyContent",
+  "75": "CSSPropertyCounterIncrement",
+  "76": "CSSPropertyCounterReset",
+  "77": "CSSPropertyCursor",
+  "78": "CSSPropertyEmptyCells",
+  "79": "CSSPropertyFloat",
+  "80": "CSSPropertyFontStretch",
+  "81": "CSSPropertyHeight",
+  "82": "CSSPropertyImageRendering",
+  "83": "CSSPropertyLeft",
+  "84": "CSSPropertyLetterSpacing",
+  "85": "CSSPropertyListStyle",
+  "86": "CSSPropertyListStyleImage",
+  "87": "CSSPropertyListStylePosition",
+  "88": "CSSPropertyListStyleType",
+  "89": "CSSPropertyMargin",
+  "90": "CSSPropertyMarginBottom",
+  "91": "CSSPropertyMarginLeft",
+  "92": "CSSPropertyMarginRight",
+  "93": "CSSPropertyMarginTop",
+  "94": "CSSPropertyMaxHeight",
+  "95": "CSSPropertyMaxWidth",
+  "96": "CSSPropertyMinHeight",
+  "97": "CSSPropertyMinWidth",
+  "98": "CSSPropertyOpacity",
+  "99": "CSSPropertyOrphans",
+  "100": "CSSPropertyOutline",
+  "101": "CSSPropertyOutlineColor",
+  "102": "CSSPropertyOutlineOffset",
+  "103": "CSSPropertyOutlineStyle",
+  "104": "CSSPropertyOutlineWidth",
+  "105": "CSSPropertyOverflow",
+  "106": "CSSPropertyOverflowWrap",
+  "107": "CSSPropertyOverflowX",
+  "108": "CSSPropertyOverflowY",
+  "109": "CSSPropertyPadding",
+  "110": "CSSPropertyPaddingBottom",
+  "111": "CSSPropertyPaddingLeft",
+  "112": "CSSPropertyPaddingRight",
+  "113": "CSSPropertyPaddingTop",
+  "114": "CSSPropertyPage",
+  "115": "CSSPropertyPageBreakAfter",
+  "116": "CSSPropertyPageBreakBefore",
+  "117": "CSSPropertyPageBreakInside",
+  "118": "CSSPropertyPointerEvents",
+  "119": "CSSPropertyPosition",
+  "120": "CSSPropertyQuotes",
+  "121": "CSSPropertyResize",
+  "122": "CSSPropertyRight",
+  "123": "CSSPropertySize",
+  "124": "CSSPropertySrc",
+  "125": "CSSPropertySpeak",
+  "126": "CSSPropertyTableLayout",
+  "127": "CSSPropertyTabSize",
+  "128": "CSSPropertyTextAlign",
+  "129": "CSSPropertyTextDecoration",
+  "130": "CSSPropertyTextIndent",
+  "136": "CSSPropertyTextOverflow",
+  "142": "CSSPropertyTextShadow",
+  "143": "CSSPropertyTextTransform",
+  "149": "CSSPropertyTop",
+  "150": "CSSPropertyTransition",
+  "151": "CSSPropertyTransitionDelay",
+  "152": "CSSPropertyTransitionDuration",
+  "153": "CSSPropertyTransitionProperty",
+  "154": "CSSPropertyTransitionTimingFunction",
+  "155": "CSSPropertyUnicodeBidi",
+  "156": "CSSPropertyUnicodeRange",
+  "157": "CSSPropertyVerticalAlign",
+  "158": "CSSPropertyVisibility",
+  "159": "CSSPropertyWhiteSpace",
+  "160": "CSSPropertyWidows",
+  "161": "CSSPropertyWidth",
+  "162": "CSSPropertyWordBreak",
+  "163": "CSSPropertyWordSpacing",
+  "164": "CSSPropertyWordWrap",
+  "165": "CSSPropertyZIndex",
+  "166": "CSSPropertyAliasWebkitAnimation",
+  "167": "CSSPropertyAliasWebkitAnimationDelay",
+  "168": "CSSPropertyAliasWebkitAnimationDirection",
+  "169": "CSSPropertyAliasWebkitAnimationDuration",
+  "170": "CSSPropertyAliasWebkitAnimationFillMode",
+  "171": "CSSPropertyAliasWebkitAnimationIterationCount",
+  "172": "CSSPropertyAliasWebkitAnimationName",
+  "173": "CSSPropertyAliasWebkitAnimationPlayState",
+  "174": "CSSPropertyAliasWebkitAnimationTimingFunction",
+  "175": "CSSPropertyWebkitAppearance",
+  "176": "CSSPropertyWebkitAspectRatio",
+  "177": "CSSPropertyAliasWebkitBackfaceVisibility",
+  "178": "CSSPropertyWebkitBackgroundClip",
+  "179": "CSSPropertyWebkitBackgroundComposite",
+  "180": "CSSPropertyWebkitBackgroundOrigin",
+  "181": "CSSPropertyAliasWebkitBackgroundSize",
+  "182": "CSSPropertyWebkitBorderAfter",
+  "183": "CSSPropertyWebkitBorderAfterColor",
+  "184": "CSSPropertyWebkitBorderAfterStyle",
+  "185": "CSSPropertyWebkitBorderAfterWidth",
+  "186": "CSSPropertyWebkitBorderBefore",
+  "187": "CSSPropertyWebkitBorderBeforeColor",
+  "188": "CSSPropertyWebkitBorderBeforeStyle",
+  "189": "CSSPropertyWebkitBorderBeforeWidth",
+  "190": "CSSPropertyWebkitBorderEnd",
+  "191": "CSSPropertyWebkitBorderEndColor",
+  "192": "CSSPropertyWebkitBorderEndStyle",
+  "193": "CSSPropertyWebkitBorderEndWidth",
+  "194": "CSSPropertyWebkitBorderFit",
+  "195": "CSSPropertyWebkitBorderHorizontalSpacing",
+  "196": "CSSPropertyWebkitBorderImage",
+  "197": "CSSPropertyAliasWebkitBorderRadius",
+  "198": "CSSPropertyWebkitBorderStart",
+  "199": "CSSPropertyWebkitBorderStartColor",
+  "200": "CSSPropertyWebkitBorderStartStyle",
+  "201": "CSSPropertyWebkitBorderStartWidth",
+  "202": "CSSPropertyWebkitBorderVerticalSpacing",
+  "203": "CSSPropertyWebkitBoxAlign",
+  "204": "CSSPropertyWebkitBoxDirection",
+  "205": "CSSPropertyWebkitBoxFlex",
+  "206": "CSSPropertyWebkitBoxFlexGroup",
+  "207": "CSSPropertyWebkitBoxLines",
+  "208": "CSSPropertyWebkitBoxOrdinalGroup",
+  "209": "CSSPropertyWebkitBoxOrient",
+  "210": "CSSPropertyWebkitBoxPack",
+  "211": "CSSPropertyWebkitBoxReflect",
+  "212": "CSSPropertyAliasWebkitBoxShadow",
+  "215": "CSSPropertyWebkitColumnBreakAfter",
+  "216": "CSSPropertyWebkitColumnBreakBefore",
+  "217": "CSSPropertyWebkitColumnBreakInside",
+  "218": "CSSPropertyAliasWebkitColumnCount",
+  "219": "CSSPropertyAliasWebkitColumnGap",
+  "220": "CSSPropertyWebkitColumnProgression",
+  "221": "CSSPropertyAliasWebkitColumnRule",
+  "222": "CSSPropertyAliasWebkitColumnRuleColor",
+  "223": "CSSPropertyAliasWebkitColumnRuleStyle",
+  "224": "CSSPropertyAliasWebkitColumnRuleWidth",
+  "225": "CSSPropertyAliasWebkitColumnSpan",
+  "226": "CSSPropertyAliasWebkitColumnWidth",
+  "227": "CSSPropertyAliasWebkitColumns",
+  "228": "CSSPropertyWebkitBoxDecorationBreak",
+  "229": "CSSPropertyWebkitFilter",
+  "230": "CSSPropertyAlignContent",
+  "231": "CSSPropertyAlignItems",
+  "232": "CSSPropertyAlignSelf",
+  "233": "CSSPropertyFlex",
+  "234": "CSSPropertyFlexBasis",
+  "235": "CSSPropertyFlexDirection",
+  "236": "CSSPropertyFlexFlow",
+  "237": "CSSPropertyFlexGrow",
+  "238": "CSSPropertyFlexShrink",
+  "239": "CSSPropertyFlexWrap",
+  "240": "CSSPropertyJustifyContent",
+  "241": "CSSPropertyWebkitFontSizeDelta",
+  "242": "CSSPropertyGridTemplateColumns",
+  "243": "CSSPropertyGridTemplateRows",
+  "244": "CSSPropertyGridColumnStart",
+  "245": "CSSPropertyGridColumnEnd",
+  "246": "CSSPropertyGridRowStart",
+  "247": "CSSPropertyGridRowEnd",
+  "248": "CSSPropertyGridColumn",
+  "249": "CSSPropertyGridRow",
+  "250": "CSSPropertyGridAutoFlow",
+  "251": "CSSPropertyWebkitHighlight",
+  "252": "CSSPropertyWebkitHyphenateCharacter",
+  "257": "CSSPropertyWebkitLineBoxContain",
+  "258": "CSSPropertyWebkitLineAlign",
+  "259": "CSSPropertyWebkitLineBreak",
+  "260": "CSSPropertyWebkitLineClamp",
+  "261": "CSSPropertyWebkitLineGrid",
+  "262": "CSSPropertyWebkitLineSnap",
+  "263": "CSSPropertyWebkitLogicalWidth",
+  "264": "CSSPropertyWebkitLogicalHeight",
+  "265": "CSSPropertyWebkitMarginAfterCollapse",
+  "266": "CSSPropertyWebkitMarginBeforeCollapse",
+  "267": "CSSPropertyWebkitMarginBottomCollapse",
+  "268": "CSSPropertyWebkitMarginTopCollapse",
+  "269": "CSSPropertyWebkitMarginCollapse",
+  "270": "CSSPropertyWebkitMarginAfter",
+  "271": "CSSPropertyWebkitMarginBefore",
+  "272": "CSSPropertyWebkitMarginEnd",
+  "273": "CSSPropertyWebkitMarginStart",
+  "280": "CSSPropertyWebkitMask",
+  "281": "CSSPropertyWebkitMaskBoxImage",
+  "282": "CSSPropertyWebkitMaskBoxImageOutset",
+  "283": "CSSPropertyWebkitMaskBoxImageRepeat",
+  "284": "CSSPropertyWebkitMaskBoxImageSlice",
+  "285": "CSSPropertyWebkitMaskBoxImageSource",
+  "286": "CSSPropertyWebkitMaskBoxImageWidth",
+  "287": "CSSPropertyWebkitMaskClip",
+  "288": "CSSPropertyWebkitMaskComposite",
+  "289": "CSSPropertyWebkitMaskImage",
+  "290": "CSSPropertyWebkitMaskOrigin",
+  "291": "CSSPropertyWebkitMaskPosition",
+  "292": "CSSPropertyWebkitMaskPositionX",
+  "293": "CSSPropertyWebkitMaskPositionY",
+  "294": "CSSPropertyWebkitMaskRepeat",
+  "295": "CSSPropertyWebkitMaskRepeatX",
+  "296": "CSSPropertyWebkitMaskRepeatY",
+  "297": "CSSPropertyWebkitMaskSize",
+  "298": "CSSPropertyWebkitMaxLogicalWidth",
+  "299": "CSSPropertyWebkitMaxLogicalHeight",
+  "300": "CSSPropertyWebkitMinLogicalWidth",
+  "301": "CSSPropertyWebkitMinLogicalHeight",
+  "303": "CSSPropertyOrder",
+  "304": "CSSPropertyWebkitPaddingAfter",
+  "305": "CSSPropertyWebkitPaddingBefore",
+  "306": "CSSPropertyWebkitPaddingEnd",
+  "307": "CSSPropertyWebkitPaddingStart",
+  "308": "CSSPropertyAliasWebkitPerspective",
+  "309": "CSSPropertyAliasWebkitPerspectiveOrigin",
+  "310": "CSSPropertyWebkitPerspectiveOriginX",
+  "311": "CSSPropertyWebkitPerspectiveOriginY",
+  "312": "CSSPropertyWebkitPrintColorAdjust",
+  "313": "CSSPropertyWebkitRtlOrdering",
+  "314": "CSSPropertyWebkitRubyPosition",
+  "315": "CSSPropertyWebkitTextCombine",
+  "316": "CSSPropertyWebkitTextDecorationsInEffect",
+  "317": "CSSPropertyWebkitTextEmphasis",
+  "318": "CSSPropertyWebkitTextEmphasisColor",
+  "319": "CSSPropertyWebkitTextEmphasisPosition",
+  "320": "CSSPropertyWebkitTextEmphasisStyle",
+  "321": "CSSPropertyWebkitTextFillColor",
+  "322": "CSSPropertyWebkitTextSecurity",
+  "323": "CSSPropertyWebkitTextStroke",
+  "324": "CSSPropertyWebkitTextStrokeColor",
+  "325": "CSSPropertyWebkitTextStrokeWidth",
+  "326": "CSSPropertyAliasWebkitTransform",
+  "327": "CSSPropertyAliasWebkitTransformOrigin",
+  "328": "CSSPropertyWebkitTransformOriginX",
+  "329": "CSSPropertyWebkitTransformOriginY",
+  "330": "CSSPropertyWebkitTransformOriginZ",
+  "331": "CSSPropertyAliasWebkitTransformStyle",
+  "332": "CSSPropertyAliasWebkitTransition",
+  "333": "CSSPropertyAliasWebkitTransitionDelay",
+  "334": "CSSPropertyAliasWebkitTransitionDuration",
+  "335": "CSSPropertyAliasWebkitTransitionProperty",
+  "336": "CSSPropertyAliasWebkitTransitionTimingFunction",
+  "337": "CSSPropertyWebkitUserDrag",
+  "338": "CSSPropertyWebkitUserModify",
+  "339": "CSSPropertyAliasWebkitUserSelect",
+  "340": "CSSPropertyWebkitFlowInto",
+  "341": "CSSPropertyWebkitFlowFrom",
+  "342": "CSSPropertyWebkitRegionFragment",
+  "343": "CSSPropertyWebkitRegionBreakAfter",
+  "344": "CSSPropertyWebkitRegionBreakBefore",
+  "345": "CSSPropertyWebkitRegionBreakInside",
+  "346": "CSSPropertyShapeInside",
+  "347": "CSSPropertyShapeOutside",
+  "348": "CSSPropertyShapeMargin",
+  "349": "CSSPropertyShapePadding",
+  "350": "CSSPropertyWebkitWrapFlow",
+  "351": "CSSPropertyWebkitWrapThrough",
+  "355": "CSSPropertyClipPath",
+  "356": "CSSPropertyClipRule",
+  "357": "CSSPropertyMask",
+  "359": "CSSPropertyFilter",
+  "360": "CSSPropertyFloodColor",
+  "361": "CSSPropertyFloodOpacity",
+  "362": "CSSPropertyLightingColor",
+  "363": "CSSPropertyStopColor",
+  "364": "CSSPropertyStopOpacity",
+  "365": "CSSPropertyColorInterpolation",
+  "366": "CSSPropertyColorInterpolationFilters",
+  "367": "CSSPropertyColorProfile",
+  "368": "CSSPropertyColorRendering",
+  "369": "CSSPropertyFill",
+  "370": "CSSPropertyFillOpacity",
+  "371": "CSSPropertyFillRule",
+  "372": "CSSPropertyMarker",
+  "373": "CSSPropertyMarkerEnd",
+  "374": "CSSPropertyMarkerMid",
+  "375": "CSSPropertyMarkerStart",
+  "376": "CSSPropertyMaskType",
+  "377": "CSSPropertyShapeRendering",
+  "378": "CSSPropertyStroke",
+  "379": "CSSPropertyStrokeDasharray",
+  "380": "CSSPropertyStrokeDashoffset",
+  "381": "CSSPropertyStrokeLinecap",
+  "382": "CSSPropertyStrokeLinejoin",
+  "383": "CSSPropertyStrokeMiterlimit",
+  "384": "CSSPropertyStrokeOpacity",
+  "385": "CSSPropertyStrokeWidth",
+  "386": "CSSPropertyAlignmentBaseline",
+  "387": "CSSPropertyBaselineShift",
+  "388": "CSSPropertyDominantBaseline",
+  "392": "CSSPropertyTextAnchor",
+  "393": "CSSPropertyVectorEffect",
+  "394": "CSSPropertyWritingMode",
+  "399": "CSSPropertyWebkitBlendMode",
+  "400": "CSSPropertyWebkitBackgroundBlendMode",
+  "401": "CSSPropertyTextDecorationLine",
+  "402": "CSSPropertyTextDecorationStyle",
+  "403": "CSSPropertyTextDecorationColor",
+  "404": "CSSPropertyTextAlignLast",
+  "405": "CSSPropertyTextUnderlinePosition",
+  "406": "CSSPropertyMaxZoom",
+  "407": "CSSPropertyMinZoom",
+  "408": "CSSPropertyOrientation",
+  "409": "CSSPropertyUserZoom",
+  "412": "CSSPropertyWebkitAppRegion",
+  "413": "CSSPropertyAliasWebkitFilter",
+  "414": "CSSPropertyWebkitBoxDecorationBreak",
+  "415": "CSSPropertyWebkitTapHighlightColor",
+  "416": "CSSPropertyBufferedRendering",
+  "417": "CSSPropertyGridAutoRows",
+  "418": "CSSPropertyGridAutoColumns",
+  "419": "CSSPropertyBackgroundBlendMode",
+  "420": "CSSPropertyMixBlendMode",
+  "421": "CSSPropertyTouchAction",
+  "422": "CSSPropertyGridArea",
+  "423": "CSSPropertyGridTemplateAreas",
+  "424": "CSSPropertyAnimation",
+  "425": "CSSPropertyAnimationDelay",
+  "426": "CSSPropertyAnimationDirection",
+  "427": "CSSPropertyAnimationDuration",
+  "428": "CSSPropertyAnimationFillMode",
+  "429": "CSSPropertyAnimationIterationCount",
+  "430": "CSSPropertyAnimationName",
+  "431": "CSSPropertyAnimationPlayState",
+  "432": "CSSPropertyAnimationTimingFunction",
+  "433": "CSSPropertyObjectFit",
+  "434": "CSSPropertyPaintOrder",
+  "435": "CSSPropertyMaskSourceType",
+  "436": "CSSPropertyIsolation",
+  "437": "CSSPropertyObjectPosition",
+  "438": "CSSPropertyInternalCallback",
+  "439": "CSSPropertyShapeImageThreshold",
+  "440": "CSSPropertyColumnFill",
+  "441": "CSSPropertyTextJustify",
+  "443": "CSSPropertyJustifySelf",
+  "444": "CSSPropertyScrollBehavior",
+  "445": "CSSPropertyWillChange",
+  "446": "CSSPropertyTransform",
+  "447": "CSSPropertyTransformOrigin",
+  "448": "CSSPropertyTransformStyle",
+  "449": "CSSPropertyPerspective",
+  "450": "CSSPropertyPerspectiveOrigin",
+  "451": "CSSPropertyBackfaceVisibility",
+  "452": "CSSPropertyGridTemplate",
+  "453": "CSSPropertyGrid",
+  "454": "CSSPropertyAll",
+  "455": "CSSPropertyJustifyItems",
+  "457": "CSSPropertyAliasMotionPath",
+  "458": "CSSPropertyAliasMotionOffset",
+  "459": "CSSPropertyAliasMotionRotation",
+  "460": "CSSPropertyMotion",
+  "461": "CSSPropertyX",
+  "462": "CSSPropertyY",
+  "463": "CSSPropertyRx",
+  "464": "CSSPropertyRy",
+  "465": "CSSPropertyFontSizeAdjust",
+  "466": "CSSPropertyCx",
+  "467": "CSSPropertyCy",
+  "468": "CSSPropertyR",
+  "469": "CSSPropertyAliasEpubCaptionSide",
+  "470": "CSSPropertyAliasEpubTextCombine",
+  "471": "CSSPropertyAliasEpubTextEmphasis",
+  "472": "CSSPropertyAliasEpubTextEmphasisColor",
+  "473": "CSSPropertyAliasEpubTextEmphasisStyle",
+  "474": "CSSPropertyAliasEpubTextOrientation",
+  "475": "CSSPropertyAliasEpubTextTransform",
+  "476": "CSSPropertyAliasEpubWordBreak",
+  "477": "CSSPropertyAliasEpubWritingMode",
+  "478": "CSSPropertyAliasWebkitAlignContent",
+  "479": "CSSPropertyAliasWebkitAlignItems",
+  "480": "CSSPropertyAliasWebkitAlignSelf",
+  "481": "CSSPropertyAliasWebkitBorderBottomLeftRadius",
+  "482": "CSSPropertyAliasWebkitBorderBottomRightRadius",
+  "483": "CSSPropertyAliasWebkitBorderTopLeftRadius",
+  "484": "CSSPropertyAliasWebkitBorderTopRightRadius",
+  "485": "CSSPropertyAliasWebkitBoxSizing",
+  "486": "CSSPropertyAliasWebkitFlex",
+  "487": "CSSPropertyAliasWebkitFlexBasis",
+  "488": "CSSPropertyAliasWebkitFlexDirection",
+  "489": "CSSPropertyAliasWebkitFlexFlow",
+  "490": "CSSPropertyAliasWebkitFlexGrow",
+  "491": "CSSPropertyAliasWebkitFlexShrink",
+  "492": "CSSPropertyAliasWebkitFlexWrap",
+  "493": "CSSPropertyAliasWebkitJustifyContent",
+  "494": "CSSPropertyAliasWebkitOpacity",
+  "495": "CSSPropertyAliasWebkitOrder",
+  "496": "CSSPropertyAliasWebkitShapeImageThreshold",
+  "497": "CSSPropertyAliasWebkitShapeMargin",
+  "498": "CSSPropertyAliasWebkitShapeOutside",
+  "499": "CSSPropertyScrollSnapType",
+  "500": "CSSPropertyScrollSnapPointsX",
+  "501": "CSSPropertyScrollSnapPointsY",
+  "502": "CSSPropertyScrollSnapCoordinate",
+  "503": "CSSPropertyScrollSnapDestination",
+  "504": "CSSPropertyTranslate",
+  "505": "CSSPropertyRotate",
+  "506": "CSSPropertyScale",
+  "507": "CSSPropertyImageOrientation",
+  "508": "CSSPropertyBackdropFilter",
+  "509": "CSSPropertyTextCombineUpright",
+  "510": "CSSPropertyTextOrientation",
+  "511": "CSSPropertyGridColumnGap",
+  "512": "CSSPropertyGridRowGap",
+  "513": "CSSPropertyGridGap",
+  "514": "CSSPropertyFontFeatureSettings",
+  "515": "CSSPropertyVariable",
+  "516": "CSSPropertyFontDisplay",
+  "517": "CSSPropertyContain",
+  "518": "CSSPropertyD",
+  "519": "CSSPropertySnapHeight",
+  "520": "CSSPropertyBreakAfter",
+  "521": "CSSPropertyBreakBefore",
+  "522": "CSSPropertyBreakInside",
+  "523": "CSSPropertyColumnCount",
+  "524": "CSSPropertyColumnGap",
+  "525": "CSSPropertyColumnRule",
+  "526": "CSSPropertyColumnRuleColor",
+  "527": "CSSPropertyColumnRuleStyle",
+  "528": "CSSPropertyColumnRuleWidth",
+  "529": "CSSPropertyColumnSpan",
+  "530": "CSSPropertyColumnWidth",
+  "531": "CSSPropertyColumns",
+  "532": "CSSPropertyApplyAtRule",
+  "533": "CSSPropertyFontVariantCaps",
+  "534": "CSSPropertyHyphens",
+  "535": "CSSPropertyFontVariantNumeric",
+  "536": "CSSPropertyTextSizeAdjust",
+  "537": "CSSPropertyAliasWebkitTextSizeAdjust",
+  "538": "CSSPropertyOverflowAnchor",
+  "539": "CSSPropertyUserSelect",
+  "540": "CSSPropertyOffsetDistance",
+  "541": "CSSPropertyOffsetPath",
+  "542": "CSSPropertyOffsetRotation",
+  "543": "CSSPropertyOffset",
+  "544": "CSSPropertyOffsetAnchor",
+  "545": "CSSPropertyOffsetPosition",
+  "546": "CSSPropertyTextDecorationSkip",
+  "547": "CSSPropertyCaretColor",
+  "548": "CSSPropertyOffsetRotate"
 }
-
 
 if '__main__' == __name__:
+#  import cProfile
+#  cProfile.run('main()', None, 2)
   main()

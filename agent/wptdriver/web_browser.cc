@@ -80,14 +80,17 @@ static const TCHAR * FIREFOX_REQUIRED_OPTIONS[] = {
 -----------------------------------------------------------------------------*/
 WebBrowser::WebBrowser(WptSettings& settings, WptTestDriver& test, 
                        WptStatus &status, BrowserSettings& browser,
-                       CIpfw &ipfw, DWORD wpt_ver):
+                       CIpfw &ipfw, Shaper &shaper, DWORD wpt_ver):
   _settings(settings)
   ,_test(test)
   ,_status(status)
   ,_browser_process(NULL)
   ,_browser(browser)
   ,_ipfw(ipfw)
+  ,_shaper(shaper)
   ,_wpt_ver(wpt_ver) {
+
+  ATLTRACE(_T("[wptdriver] - WebBrowser::WebBrowser"));
 
   InitializeCriticalSection(&cs);
 
@@ -122,7 +125,9 @@ bool WebBrowser::RunAndWait() {
   _browser_needs_reset.Empty();
 
   if (_test.Start() && ConfigureIpfw(_test)) {
-    if (_browser._exe.GetLength()) {
+    if (_browser.IsWebdriver()) {
+      ret = RunWebdriverTest();
+    } else if (_browser._exe.GetLength()) {
       CString exe(_browser._exe);
       exe.MakeLower();
       if (exe.Find(_T("chrome.exe")) >= 0)
@@ -235,8 +240,12 @@ bool WebBrowser::RunAndWait() {
       }
 
       // set up the TLS session key log
-      SetEnvironmentVariable(L"SSLKEYLOGFILE", _test._file_base + L"_keylog.log");
       DeleteFile(_test._file_base + L"_keylog.log");
+      if (_test._tcpdump) {
+        SetEnvironmentVariable(L"SSLKEYLOGFILE", _test._file_base + L"_keylog.log");
+      } else {
+        SetEnvironmentVariable(L"SSLKEYLOGFILE", NULL);
+      }
 
       _status.Set(_T("Launching: %s"), cmdLine);
 
@@ -317,6 +326,7 @@ bool WebBrowser::RunAndWait() {
           #endif
           WaitForSingleObject(_browser_done_event, wait_time);
           WaitForSingleObject(_browser_process, 10000);
+          _status.Set(_T("Test complete, processing result..."));
         }
       } else {
         _status.Set(_T("Error initializing browser event"));
@@ -334,11 +344,13 @@ bool WebBrowser::RunAndWait() {
       TerminateProcessesByName(PathFindFileName((LPCTSTR)_browser._exe));
 
       g_shared->SetBrowserExe(NULL);
-      ResetIpfw();
+      SetEnvironmentVariable(L"SSLKEYLOGFILE", NULL);
 
     } else {
       _test._run_error = "Browser configured incorrectly (exe not defined).";
     }
+
+    ResetIpfw();
   } else {
     _test._run_error = "Failed to configure IPFW/dummynet.  Is it installed?";
   }
@@ -422,7 +434,13 @@ bool WebBrowser::ConfigureIpfw(WptTestDriver& test) {
                 test._latency, test._plr );
     ATLTRACE(buff);
 
-    if (_ipfw.SetPipe(PIPE_IN, test._bwIn, latency, test._plr/100.0, true)) {
+    if (_shaper.IsAvailable()) {
+      DWORD latencyIn = latency;
+      DWORD latencyOut = latency;
+      if( test._latency % 2 )
+        latencyIn++;
+      ret = _shaper.Enable(test._bwIn, test._bwOut, latencyIn, latencyOut, test._plr);
+    } else if (_ipfw.SetPipe(PIPE_IN, test._bwIn, latency, test._plr/100.0, true)) {
       // make up for odd values
       if( test._latency % 2 )
         latency++;
@@ -447,8 +465,12 @@ bool WebBrowser::ConfigureIpfw(WptTestDriver& test) {
   Remove the bandwidth throttling
 -----------------------------------------------------------------------------*/
 void WebBrowser::ResetIpfw(void) {
-  _ipfw.SetPipe(PIPE_IN, 0, 0, 0, true);
-  _ipfw.SetPipe(PIPE_OUT, 0, 0, 0, false);
+  if (_shaper.IsAvailable()) {
+    _shaper.Disable();
+  } else {
+    _ipfw.SetPipe(PIPE_IN, 0, 0, 0, true);
+    _ipfw.SetPipe(PIPE_OUT, 0, 0, 0, false);
+  }
 }
 
 /*-----------------------------------------------------------------------------
@@ -616,27 +638,19 @@ void WebBrowser::ConfigureIESettings() {
                        _T("Software\\Microsoft\\Internet Explorer\\Main"),
                        0, 0, 0, KEY_WRITE, 0, &hKey, 0) == ERROR_SUCCESS ) {
       LPCTSTR szVal = _T("yes");
-      RegSetValueEx(hKey, _T("DisableScriptDebuggerIE"), 0, REG_SZ,
-                    (const LPBYTE)szVal, (lstrlen(szVal) + 1) * sizeof(TCHAR));
+      RegSetValueEx(hKey, _T("DisableScriptDebuggerIE"), 0, REG_SZ, (const LPBYTE)szVal, (lstrlen(szVal) + 1) * sizeof(TCHAR));
 
       szVal = _T("no");
-      RegSetValueEx(hKey, _T("FormSuggest PW Ask"), 0, REG_SZ,
-                    (const LPBYTE)szVal, (lstrlen(szVal) + 1) * sizeof(TCHAR));
-      RegSetValueEx(hKey, _T("Friendly http errors"), 0, REG_SZ,
-                    (const LPBYTE)szVal, (lstrlen(szVal) + 1) * sizeof(TCHAR));
-      RegSetValueEx(hKey, _T("Use FormSuggest"), 0, REG_SZ,
-                    (const LPBYTE)szVal, (lstrlen(szVal) + 1) * sizeof(TCHAR));
+      RegSetValueEx(hKey, _T("FormSuggest PW Ask"), 0, REG_SZ, (const LPBYTE)szVal, (lstrlen(szVal) + 1) * sizeof(TCHAR));
+      RegSetValueEx(hKey, _T("Friendly http errors"), 0, REG_SZ, (const LPBYTE)szVal, (lstrlen(szVal) + 1) * sizeof(TCHAR));
+      RegSetValueEx(hKey, _T("Use FormSuggest"), 0, REG_SZ, (const LPBYTE)szVal, (lstrlen(szVal) + 1) * sizeof(TCHAR));
 
       DWORD val = 1;
-      RegSetValueEx(hKey, _T("NoUpdateCheck"), 0, REG_DWORD,
-                    (const LPBYTE)&val, sizeof(val));
-      RegSetValueEx(hKey, _T("NoJITSetup"), 0, REG_DWORD,
-                    (const LPBYTE)&val, sizeof(val));
-      RegSetValueEx(hKey, _T("NoWebJITSetup"), 0, REG_DWORD,
-                    (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("NoUpdateCheck"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("NoJITSetup"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("NoWebJITSetup"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
       //val = 0;
-      RegSetValueEx(hKey, _T("UseSWRender"), 0, REG_DWORD,
-                    (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("UseSWRender"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
       RegCloseKey(hKey);
     }
 
@@ -644,8 +658,7 @@ void WebBrowser::ConfigureIESettings() {
         _T("Software\\Microsoft\\Internet Explorer\\InformationBar"), 0, 0, 0,
         KEY_WRITE, 0, &hKey, 0) == ERROR_SUCCESS) {
       DWORD val = 0;
-      RegSetValueEx(hKey, _T("FirstTime"), 0, REG_DWORD,
-                    (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("FirstTime"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
       RegCloseKey(hKey);
     }
 
@@ -653,13 +666,10 @@ void WebBrowser::ConfigureIESettings() {
         _T("Software\\Microsoft\\Internet Explorer\\PhishingFilter"), 0, 0, 0,
         KEY_WRITE, 0, &hKey, 0) == ERROR_SUCCESS) {
       DWORD val = 0;
-      RegSetValueEx(hKey, _T("EnabledV9"), 0, REG_DWORD,
-                    (const LPBYTE)&val, sizeof(val));
-      RegSetValueEx(hKey, _T("Enabled"), 0, REG_DWORD,
-                    (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("EnabledV9"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("Enabled"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
       val = 3;
-      RegSetValueEx(hKey, _T("ShownVerifyBalloon"), 0, REG_DWORD,
-                    (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("ShownVerifyBalloon"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
       RegCloseKey(hKey);
     }
 
@@ -667,8 +677,7 @@ void WebBrowser::ConfigureIESettings() {
         _T("Software\\Microsoft\\Internet Explorer\\IntelliForms"), 0, 0, 0,
         KEY_WRITE, 0, &hKey, 0) == ERROR_SUCCESS) {
       DWORD val = 0;
-      RegSetValueEx(hKey, _T("AskUser"), 0, REG_DWORD,
-                    (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("AskUser"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
       RegCloseKey(hKey);
     }
 
@@ -676,14 +685,11 @@ void WebBrowser::ConfigureIESettings() {
         _T("Software\\Microsoft\\Internet Explorer\\Security"), 0, 0, 0,
         KEY_WRITE, 0, &hKey, 0) == ERROR_SUCCESS) {
       LPCTSTR szVal = _T("Query");
-      RegSetValueEx(hKey, _T("Safety Warning Level"), 0, REG_SZ,
-                    (const LPBYTE)szVal, (lstrlen(szVal) + 1) * sizeof(TCHAR));
+      RegSetValueEx(hKey, _T("Safety Warning Level"), 0, REG_SZ, (const LPBYTE)szVal, (lstrlen(szVal) + 1) * sizeof(TCHAR));
       szVal = _T("Medium");
-      RegSetValueEx(hKey, _T("Sending_Security"), 0, REG_SZ,
-                    (const LPBYTE)szVal, (lstrlen(szVal) + 1) * sizeof(TCHAR));
+      RegSetValueEx(hKey, _T("Sending_Security"), 0, REG_SZ, (const LPBYTE)szVal, (lstrlen(szVal) + 1) * sizeof(TCHAR));
       szVal = _T("Low");
-      RegSetValueEx(hKey, _T("Viewing_Security"), 0, REG_SZ,
-                    (const LPBYTE)szVal, (lstrlen(szVal) + 1) * sizeof(TCHAR));
+      RegSetValueEx(hKey, _T("Viewing_Security"), 0, REG_SZ, (const LPBYTE)szVal, (lstrlen(szVal) + 1) * sizeof(TCHAR));
       RegCloseKey(hKey);
     }
 
@@ -691,26 +697,17 @@ void WebBrowser::ConfigureIESettings() {
         _T("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"),
         0, 0, 0, KEY_WRITE, 0, &hKey, 0) == ERROR_SUCCESS) {
       DWORD val = 1;
-      RegSetValueEx(hKey, _T("AllowCookies"), 0, REG_DWORD,
-                    (const LPBYTE)&val, sizeof(val));
-      RegSetValueEx(hKey, _T("EnableHttp1_1"), 0, REG_DWORD,
-                    (const LPBYTE)&val, sizeof(val));
-      RegSetValueEx(hKey, _T("ProxyHttp1.1"), 0, REG_DWORD,
-                    (const LPBYTE)&val, sizeof(val));
-      RegSetValueEx(hKey, _T("EnableNegotiate"), 0, REG_DWORD,
-                    (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("AllowCookies"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("EnableHttp1_1"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("ProxyHttp1.1"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("EnableNegotiate"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
 
       val = 0;
-      RegSetValueEx(hKey, _T("WarnAlwaysOnPost"), 0,
-                    REG_DWORD, (const LPBYTE)&val, sizeof(val));
-      RegSetValueEx(hKey, _T("WarnonBadCertRecving"), 0,
-                    REG_DWORD, (const LPBYTE)&val, sizeof(val));
-      RegSetValueEx(hKey, _T("WarnOnPost"), 0, REG_DWORD,
-                    (const LPBYTE)&val, sizeof(val));
-      RegSetValueEx(hKey, _T("WarnOnPostRedirect"), 0,
-                    REG_DWORD, (const LPBYTE)&val, sizeof(val));
-      RegSetValueEx(hKey, _T("WarnOnZoneCrossing"), 0,
-                    REG_DWORD, (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("WarnAlwaysOnPost"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("WarnonBadCertRecving"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("WarnOnPost"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("WarnOnPostRedirect"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("WarnOnZoneCrossing"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
       RegCloseKey(hKey);
     }
 
@@ -719,8 +716,7 @@ void WebBrowser::ConfigureIESettings() {
         _T("\\5.0\\Cache\\Content"), 0, 0, 0, KEY_WRITE, 0, &hKey, 0)
         == ERROR_SUCCESS) {
       DWORD val = 131072;
-      RegSetValueEx(hKey, _T("CacheLimit"), 0, REG_DWORD,
-                    (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("CacheLimit"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
       RegCloseKey(hKey);
     }
 
@@ -729,8 +725,7 @@ void WebBrowser::ConfigureIESettings() {
         _T("\\Cache\\Content"), 0, 0, 0, KEY_WRITE, 0, &hKey, 0)
         == ERROR_SUCCESS) {
       DWORD val = 131072;
-      RegSetValueEx(hKey, _T("CacheLimit"), 0, REG_DWORD,
-                    (const LPBYTE)&val, sizeof(val));
+      RegSetValueEx(hKey, _T("CacheLimit"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
       RegCloseKey(hKey);
     }
 
@@ -749,12 +744,10 @@ void WebBrowser::ConfigureIESettings() {
       DWORD val = 0;
       
       // don't warn about posting data
-      RegSetValueEx(hKey, _T("1601"), 0, REG_DWORD, (const LPBYTE)&val,
-                    sizeof(val));
+      RegSetValueEx(hKey, _T("1601"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
 
       // don't warn about mixed content
-      RegSetValueEx(hKey, _T("1609"), 0, REG_DWORD, (const LPBYTE)&val,
-                    sizeof(val));
+      RegSetValueEx(hKey, _T("1609"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
 
       RegCloseKey(hKey);
     }
@@ -766,6 +759,33 @@ void WebBrowser::ConfigureIESettings() {
       DWORD val = 0;
       RegSetValueEx(hKey, _T("VersionCheckEnabled"), 0, REG_DWORD,
                     (const LPBYTE)&val, sizeof(val));
+      val = 1;
+      RegSetValueEx(hKey, _T("IgnoreFrameApprovalCheck"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
+      RegCloseKey(hKey);
+    }
+
+    // Make sure the bho is enabled
+    if (RegCreateKeyEx(HKEY_LOCAL_MACHINE,
+        _T("Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Ext"),
+        0, 0, 0, KEY_WRITE, 0, &hKey, 0) == ERROR_SUCCESS) {
+      DWORD val = 1;
+      RegSetValueEx(hKey, _T("IgnoreFrameApprovalCheck"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
+      RegCloseKey(hKey);
+    }
+    if (RegCreateKeyEx(HKEY_CURRENT_USER,
+        _T("Software\\Microsoft\\Windows\\CurrentVersion\\Ext\\Settings\\{2B925455-8D0C-401F-AA4C-9336C2167F14}"),
+        0, 0, 0, KEY_WRITE, 0, &hKey, 0) == ERROR_SUCCESS) {
+      DWORD val = 0x400;
+      RegSetValueEx(hKey, _T("Flags"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
+      RegCloseKey(hKey);
+    }
+
+    // Disable the prompt that asks you to confirm your start page and search provider
+    if (RegCreateKeyEx(HKEY_CURRENT_USER,
+                       _T("Software\\Microsoft\\Internet Explorer\\Main\\FeatureControl\\FEATURE_EUPP_GLOBAL_FORCE_DISABLE"),
+                       0, 0, 0, KEY_WRITE, 0, &hKey, 0) == ERROR_SUCCESS ) {
+      DWORD val = 1;
+      RegSetValueEx(hKey, _T("iexplore.exe"), 0, REG_DWORD, (const LPBYTE)&val, sizeof(val));
       RegCloseKey(hKey);
     }
 }
@@ -794,13 +814,13 @@ void WebBrowser::ConfigureChromePreferences() {
   HANDLE file = CreateFile(prefs_file, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);
   if (file != INVALID_HANDLE_VALUE) {
     DWORD written = 0;
-    WriteFile(file, prefs, strlen(prefs), &written, 0);
+    WriteFile(file, prefs, lstrlenA(prefs), &written, 0);
     CloseHandle(file);
   }
   file = CreateFile(master_prefs_file, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);
   if (file != INVALID_HANDLE_VALUE) {
     DWORD written = 0;
-    WriteFile(file, prefs, strlen(prefs), &written, 0);
+    WriteFile(file, prefs, lstrlenA(prefs), &written, 0);
     CloseHandle(file);
   }
 }
@@ -822,4 +842,33 @@ void WebBrowser::CreateChromeSymlink() {
       _browser._exe = newDir + "\\Application\\chrome.exe";
     }
   }
+}
+
+/*-----------------------------------------------------------------------------
+  Save the test info out, run the stand-alone webdriver test and wait for it
+  to finish.
+-----------------------------------------------------------------------------*/
+bool WebBrowser::RunWebdriverTest() {
+  bool ok = false;
+  ATLTRACE(L"WebBrowser::RunWebdriverTest");
+  CString json_file = _test.SaveJson();
+  if (!json_file.IsEmpty()) {
+    TCHAR recorder_path[MAX_PATH];
+    GetModuleFileName(NULL, recorder_path, _countof(recorder_path));
+    lstrcpy(PathFindFileName(recorder_path), _T("wptRecord.exe"));
+    CString options;
+    options.Format(_T("-t \"%s\" -r \"%s\""), (LPCTSTR)json_file, (LPCTSTR)recorder_path);
+    ATLTRACE(options);
+    _status.Set(_T("Running webdriver test..."));
+    if (RunPythonScript(_T("webdriver\\edge.py"), options)) {
+      _status.Set(_T("Test complete, processing result..."));
+      g_shared->SetTestResult(0);
+      ok = true;
+    } else {
+      ATLTRACE(L"RunPythonScript failed");
+      _status.Set(_T("Test failed"));
+    }
+    DeleteFile(json_file);
+  }
+  return ok;
 }
