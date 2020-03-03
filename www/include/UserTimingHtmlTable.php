@@ -13,7 +13,6 @@ class UserTimingHtmlTable {
   private $isMultistep;
   private $hasNavTiming;
   private $hasUserTiming;
-  private $hasFirstPaint;
   private $hasDomInteractive;
 
   /**
@@ -25,7 +24,6 @@ class UserTimingHtmlTable {
     $this->hasNavTiming = $runResults->hasValidMetric("loadEventStart") ||
                           $runResults->hasValidMetric("domContentLoadedEventStart");
     $this->hasUserTiming = $this->_initUserTimings();
-    $this->hasFirstPaint = $this->runResults->hasValidMetric("firstPaint");
     $this->hasDomInteractive = $this->runResults->hasValidMetric("domInteractive");
     $this->isMultistep = $runResults->countSteps() > 1;
   }
@@ -49,12 +47,11 @@ class UserTimingHtmlTable {
     }
     if ($this->hasUserTiming) {
       foreach ($this->userTimings[0] as $label => $value)
-        $out .= '<th>' . htmlspecialchars($label) . '</th>';
+        if (count($this->userTimings[0]) < 5 || substr($label, 0, 5) !== 'goog_')
+          $out .= '<th>' . htmlspecialchars($label) . '</th>';
     }
     if ($this->hasNavTiming) {
       $out .= "<th$borderClass>";
-      if ($this->hasFirstPaint)
-        $out .= "RUM First Paint</th><th>";
       if ($this->hasDomInteractive)
         $out .= "<a href=\"http://w3c.github.io/navigation-timing/#h-processing-model\">domInteractive</a></th><th>";
       $out .= "<a href=\"http://w3c.github.io/navigation-timing/#h-processing-model\">domContentLoaded</a></th>";
@@ -80,11 +77,10 @@ class UserTimingHtmlTable {
     }
     if ($this->hasUserTiming)
       foreach ($stepUserTiming as $label => $value)
-        $out .= '<td>' . htmlspecialchars($value) . '</td>';
+        if (count($stepUserTiming) < 5 || substr($label, 0, 5) !== 'goog_')
+          $out .= '<td>' . htmlspecialchars($value) . '</td>';
     if ($this->hasNavTiming) {
       $out .= "<td$borderClass>";
-      if ($this->hasFirstPaint)
-        $out .= $this->_getTimeMetric($stepResult, "firstPaint") . '</td><td>';
       if ($this->hasDomInteractive)
         $out .= $this->_getTimeMetric($stepResult, "domInteractive") . '</td><td>';
       $out .= $this->_getTimeRangeMetric($stepResult, 'domContentLoadedEventStart', 'domContentLoadedEventEnd');
@@ -123,11 +119,13 @@ class UserTimingHtmlTable {
         $userTimings[substr($metric, 9)] = number_format($value / 1000, 3) . 's';
     if (isset($data['custom']) && count($data['custom'])) {
       foreach($data['custom'] as $metric) {
-        if (isset($data[$metric])) {
+        if (isset($data[$metric]) && !is_array($data[$metric])) {
           $value = $data[$metric];
-          if (is_double($value))
-            $value = number_format($value, 3, '.', '');
-          $userTimings[$metric] = $value;
+          if (strlen($value) < 30) {
+            if (is_double($value))
+              $value = number_format($value, 3, '.', '');
+            $userTimings[$metric] = $value;
+          }
         }
       }
     }

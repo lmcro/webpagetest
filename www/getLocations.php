@@ -31,7 +31,7 @@ if( array_key_exists('f', $_REQUEST) && $_REQUEST['f'] == 'json' ) {
   json_response($ret);
 } elseif( array_key_exists('f', $_REQUEST) && $_REQUEST['f'] == 'html' ) {
   $refresh = 240;
-  $title = 'WebPagetest - Location Status';
+  $title = 'WebPageTest - Location Status';
   include 'admin_header.inc';
 
   echo "<table class=\"table\">\n";
@@ -87,7 +87,7 @@ if( array_key_exists('f', $_REQUEST) && $_REQUEST['f'] == 'json' ) {
   echo "<response>\n";
   echo "<statusCode>200</statusCode>\n";
   echo "<statusText>Ok</statusText>\n";
-  if( strlen($_REQUEST['r']) )
+  if( isset($_REQUEST['r']) && strlen($_REQUEST['r']) )
       echo "<requestId>{$_REQUEST['r']}</requestId>\n";
   echo "<data>\n";
 

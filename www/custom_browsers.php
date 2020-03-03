@@ -43,8 +43,7 @@ if (isset($_REQUEST['name']) && isset($_FILES['apk']['tmp_name']) && isset($_FIL
             'activity' => 'org.chromium.content_shell_apk.ContentShellActivity',
             'flagsFile' => '/data/local/tmp/content-shell-command-line',
             'socket' => 'localabstract:content_shell_devtools_remote');
-        if (isset($_REQUEST['type']))
-          $apk_settings['type'] = trim($_REQUEST['type']);
+
         file_put_contents("./browsers/$name.json", json_encode($apk_settings));
         $md5 = md5_file("./browsers/$name.apk");
         if ($md5 !== false) {
@@ -69,7 +68,7 @@ if (isset($_REQUEST['name']) && isset($_FILES['apk']['tmp_name']) && isset($_FIL
 <!DOCTYPE html>
 <html>
     <head>
-        <title>WebPagetest - Custom Browsers</title>
+        <title>WebPageTest - Custom Browsers</title>
         <meta http-equiv="charset" content="iso-8859-1">
         <meta name="keywords" content="Performance, Optimization, Pagetest, Page Design, performance site web, internet performance, website performance, web applications testing, web application performance, Internet Tools, Web Development, Open Source, http viewer, debugger, http sniffer, ssl, monitor, http header, http header viewer">
         <meta name="description" content="Speed up the performance of your web pages with an automated analysis">
@@ -91,7 +90,7 @@ if (isset($_REQUEST['name']) && isset($_FILES['apk']['tmp_name']) && isset($_FIL
             $tab = 'custom';
             include 'header.inc';
             ?>
-            
+
             <div class="translucent">
                 <?php
                 if (isset($uploadResult)) {
@@ -103,23 +102,9 @@ if (isset($_REQUEST['name']) && isset($_FILES['apk']['tmp_name']) && isset($_FIL
                 <form name="upload" method="POST" action="custom_browsers.php" enctype="multipart/form-data">
                 <br>
                 <label for="name">
-                    Friendly Name:
+                    Friendly Name
                 </label>
                 <input type="text" name="name" id="name" size="40"> <small>(Alpha-numeric, underscores, dashes, no spaces)</small><br><br>
-                <label for="type">
-                    Browser Type:
-                </label>
-                <select name="type">
-                  <option value="Chrome">Chrome</option>
-                  <option value="Blimp">Blimp</option>
-                  <option value="Firefox">Firefox</option>
-                  <option value="Firefox Beta">Firefox Beta</option>
-                  <option value="Opera Mini">Opera Mini</option>
-                  <option value="Samsung Browser">Samsung Browser</option>
-                  <option value="UC Browser">UC Browser</option>
-                  <option value="UC Mini">UC Mini</option>
-                  <option value="QQ Browser">QQ Browser</option>
-                </select><br><br>
                 <label for="apk">
                     APK File
                 </label>
@@ -135,7 +120,7 @@ if (isset($_REQUEST['name']) && isset($_FILES['apk']['tmp_name']) && isset($_FIL
                 DisplayBrowsers('zip');
                 ?>
             </div>
-            
+
             <?php include('footer.inc'); ?>
         </div>
     </body>

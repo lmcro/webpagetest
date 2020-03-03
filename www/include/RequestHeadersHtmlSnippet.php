@@ -64,7 +64,7 @@ class RequestHeadersHtmlSnippet {
       $out .= '<br>';
     }
     if (isset($request['was_pushed']) && $request['was_pushed'] > 0)
-        echo '<b>SERVER PUSHED</b>';
+        echo '<b>SERVER PUSHED</b><br>';
     if (array_key_exists('initiator', $request) && strlen($request['initiator'])) {
       $out .= "<b>Initiated By:</b> " . htmlspecialchars($request['initiator']);
       if (array_key_exists('initiator_line', $request) && strlen($request['initiator_line']))
@@ -75,11 +75,6 @@ class RequestHeadersHtmlSnippet {
     }
     if (array_key_exists('client_port', $request) && intval($request['client_port']))
       $out .= "<b>Client Port:</b> " . htmlspecialchars($request['client_port']) . "<br>\n";
-    if (array_key_exists('custom_rules', $request)) {
-      foreach ($request['custom_rules'] as $rule_name => &$rule) {
-        $out .= "<b>Custom Rule - " . htmlspecialchars($rule_name) . ": </b>(" . htmlspecialchars($rule['count']) . " matches) - " . htmlspecialchars($rule['value']) . "<br>\n";
-      }
-    }
     $out .= "<b>Request Start:</b> " . number_format($request['load_start'] / 1000.0, 3) . " s<br>\n";
     if (array_key_exists('dns_ms', $request) && $request['dns_ms'] > 0)
       $out .= "<b>DNS Lookup:</b> {$request['dns_ms']} ms<br>\n";
@@ -90,13 +85,15 @@ class RequestHeadersHtmlSnippet {
     if (array_key_exists('download_ms', $request) && $request['download_ms'] > 0)
       $out .= "<b>Content Download:</b> {$request['download_ms']} ms<br>\n";
     $out .= "<b>Bytes In (downloaded):</b> " . number_format($request['bytesIn'] / 1024.0, 1) . " KB<br>\n";
+    if (isset($request['objectSizeUncompressed']) && $request['objectSizeUncompressed'] > 0)
+      $out .= "<b>Uncompressed Size:</b> " . number_format($request['objectSizeUncompressed'] / 1024.0, 1) . " KB<br>\n";
     if (!empty($request['certificate_bytes']) && (int)$request['certificate_bytes'] > 0)
       $out .= "<b>Certificates (downloaded):</b> " . number_format($request['certificate_bytes'], 0) . " B<br>\n";
     $out .= "<b>Bytes Out (uploaded):</b> " . number_format($request['bytesOut'] / 1024.0, 1) . " KB<br>\n";
     $urlGenerator = $this->stepResult->createUrlGenerator("", false);
 
     $responseBodyUrl = null;
-    if (isset($request['body_id']) && $request['body_id'] > 0) {
+    if (isset($request['body_id']) && $request['body_id'] !== 0) {
       $responseBodyUrl = $urlGenerator->responseBodyWithBodyId($request['body_id']);
     } elseif (array_key_exists('body', $request) && $request['body']) {
       $responseBodyUrl = $urlGenerator->responseBodyWithRequestNumber($requestNum);

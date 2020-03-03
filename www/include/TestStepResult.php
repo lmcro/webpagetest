@@ -57,16 +57,16 @@ class TestStepResult {
    * @param array $options Options for the loadPageStepData
    * @return TestStepResult|null The created instance on success, null otherwise
    */
-  public static function fromFiles($testInfo, $runNumber, $isCached, $stepNumber, $fileHandler = null, $options = null) {
+  public static function fromFiles($testInfo, $runNumber, $isCached, $stepNumber, $fileHandler = null) {
     // no support to use FileHandler so far
     $localPaths = new TestPaths($testInfo->getRootDirectory(), $runNumber, $isCached, $stepNumber);
     $runCompleted = $testInfo->isRunComplete($runNumber);
-    $pageData = loadPageStepData($localPaths, $runCompleted, $options, $testInfo->getInfoArray());
+    $pageData = loadPageStepData($localPaths, $runCompleted, $testInfo->getInfoArray());
     return new self($testInfo, $pageData, $runNumber, $isCached, $stepNumber, $fileHandler);
   }
 
   /**
-   * @return bool True if there is valid test step result data, false otherwise.
+   * @return bool True if there is valid test-step result data, false otherwise.
    */
   public function isValid() {
     return !empty($this->rawData) && is_array($this->rawData) &&
@@ -75,7 +75,7 @@ class TestStepResult {
 
   /**
    * @param string $baseUrl The base URL to use for the UrlGenerator
-   * @param bool $friendly Optional. True for friendly URLS (default), false for standard URLs
+   * @param bool $friendly Optional. True for friendly URLs (default), false for standard URLs
    * @return UrlGenerator The created URL generator for this step
    */
   public function createUrlGenerator($baseUrl, $friendly = true) {
@@ -185,13 +185,12 @@ class TestStepResult {
     return null;
   }
 
-  public function getVisualProgress($end = null) {
+  public function getVisualProgress() {
     // TODO: move implementation to this method
     if (!$this->fileHandler->dirExists($this->localPaths->videoDir())) {
       return array();
     }
-    return GetVisualProgressForStep($this->localPaths, $this->testInfo->isRunComplete($this->run), null, $end,
-      $this->getStartOffset());
+    return GetVisualProgressForStep($this->localPaths, $this->testInfo->isRunComplete($this->run), $this->getStartOffset());
   }
 
   public function getRequestsWithInfo($addLocationData, $addRawHeaders) {

@@ -1,10 +1,10 @@
 <?php
-require_once('archive.inc');
+require_once(__DIR__ . '/archive.inc');
+require_once(__DIR__ . '/util.inc');
 
 if(extension_loaded('newrelic')) {
   newrelic_add_custom_tracer('RestoreTest');
   newrelic_add_custom_tracer('SBL_Check');
-  newrelic_add_custom_tracer('SBL_Update');
 }
 
 define('VIDEO_CODE_VERSION', 20);
@@ -12,14 +12,14 @@ define('VIDEO_CODE_VERSION', 20);
 require_once(__DIR__ . '/logging.inc');
 
 /**
-* Figure out the test path (relative) for the given test id
+* Figure out the test path (relative) for the given test ID
 *
 * @param mixed $id
 */
 function GetTestPath($id)
 {
     $base = 'results';
-    // see if it is a relay test (includes the key)
+    // see if it is a relay test (which includes the key)
     $separator = strrpos($id, '.');
     if ($separator !== false ) {
       $key = trim(substr($id, 0, $separator));
@@ -60,7 +60,7 @@ function GetTestPath($id)
 * @param mixed $location
 */
 function GetLocationKey($location) {
-  $key = '';
+  $key = GetSetting('location_key', '');
   $info = GetLocationInfo($location);
   if (isset($info) && is_array($info) && isset($info['key'])) {
     $key = $info['key'];
@@ -94,7 +94,7 @@ function GetLocationInfo($location) {
       if (isset($info))
         $from_cache = true;
     }
-    
+
     if (!isset($info)) {
       $info = array();
       $locations = LoadLocationsIni();
@@ -106,7 +106,7 @@ function GetLocationInfo($location) {
         }
       }
     }
-    
+
     if (isset($info) && !$from_cache) {
       if ($has_apcu)
         apcu_store("locinfo_$location", $info, 120);
@@ -158,7 +158,7 @@ function GetLocationFallbacks($location) {
       }
     }
   }
-  
+
   $fallbacks = array();
   if (isset($fallback) && strlen($fallback))
     $fallbacks = explode(',', $fallback);
@@ -194,12 +194,12 @@ function LoadLocationsIni() {
       } else {
         $locations = $ec2;
       }
-      
+
       // see if we have a setting to override the default location
       $default = GetSetting('EC2.default');
       if ($default && strlen($default)) {
         $defaultGroup = null;
-        
+
         // Figure out what group the default location is in
         foreach($ec2 as $name => $group) {
           if ($name !== 'locations' && !isset($group['browser']) && isset($group[1])) {
@@ -211,7 +211,7 @@ function LoadLocationsIni() {
             }
           }
         }
-        
+
         if (isset($defaultGroup)) {
           $locations['locations']['default'] = $defaultGroup;
           $locations[$defaultGroup]['default'] = $default;
@@ -225,9 +225,9 @@ function LoadLocationsIni() {
 /**
 * Get a setting from settings.ini (and cache it for up to a minute)
 */
-function GetSetting($setting) {
+function GetSetting($setting, $default = FALSE) {
   global $settings;
-  $ret = false;
+  $ret = $default;
   if (function_exists('apcu_fetch') &&
       function_exists('apcu_store')) {
     $value = apcu_fetch("setting_$setting", $success);
@@ -285,7 +285,7 @@ function FitText($text, $max_len) {
 }
 
 /**
- * Create a shorter version of the url for displaying.
+ * Create a shorter version of the URL for displaying.
  */
 function ShortenUrl($url) {
   $short_url = $url;
@@ -298,7 +298,7 @@ function ShortenUrl($url) {
 }
 
 /**
- * Create a friendlier (unique) name for the download file from the url that was tested.
+ * Create a friendlier (unique) name for the download file from the URL that was tested.
  */
 function GetFileUrl($url)
 {
@@ -309,7 +309,7 @@ function GetFileUrl($url)
 }
 
 /**
-* Set the php locale based on the browser's accept-languages header
+* Set the PHP locale based on the browser's accept-languages header
 * (if one exists) - only works on linux for now
 */
 function SetLocaleFromBrowser()
@@ -339,7 +339,7 @@ function generate_languages()
             } else {
                 $qual = explode('=', $parts[1]);
             }
-            if (count($qual) == 2) {
+            if (is_array($qual) && count($qual) == 2) {
                 $qual = (float)$qual[1];  // q-factor
             } else {
                 $qual = 1;  // ill-formed q-f
@@ -363,7 +363,7 @@ function lang_compare_quality($in_a, $in_b)
 }
 
 /**
-* Figure out the path to the video directory given an id
+* Figure out the path to the video directory given an ID
 *
 * @param mixed $id
 */
@@ -445,6 +445,8 @@ function delTree($dir, $remove = true)
     }
     if ($remove)
       rmdir( $dir );
+  } else {
+    unlink($dir);
   }
 }
 
@@ -519,7 +521,7 @@ function gz_readfile_chunked($filename, $retbytes = TRUE)
 }
 
 /**
-* Transparently read a gzip version of the given file (we will be looking for .gz extensions though it's not technically required, just good practice)
+* Transparently read a GZIP version of the given file (we will be looking for .gz extensions though it's not technically required, just good practice)
 *
 * @param mixed $file
 */
@@ -548,7 +550,7 @@ function gz_file_get_contents($file) {
 }
 
 /**
-* Write out a gzip version of the given file (tacking on the .gz automatically)
+* Write out a GZIP version of the given file (tacking on the .gz automatically)
 *
 * @param mixed $filename
 * @param mixed $data
@@ -559,7 +561,7 @@ function gz_file_put_contents($filename, $data)
     $nogzip = GetSetting('nogzip');
     if( !$nogzip && extension_loaded('zlib') )
     {
-        $zip = gzopen("$filename.gz", 'wb6');
+        $zip = @gzopen("$filename.gz", 'wb6');
         if( $zip !== false )
         {
             if( gzwrite($zip, $data) )
@@ -577,7 +579,7 @@ function gz_file_put_contents($filename, $data)
 }
 
 /**
-* read a gzip file into an array
+* read a GZIP file into an array
 *
 * @param mixed $filename
 */
@@ -664,7 +666,7 @@ function GetPageSpeedScore($file, $data = null)
 */
 function LoadPageSpeedData($file) {
   $pagespeed = false;
-  
+
   if (gz_is_file($file)) {
     $pagespeed = json_decode(gz_file_get_contents($file), true);
 
@@ -795,7 +797,7 @@ function BuildLocations( &$locations )
 */
 function FilterLocations(&$locations, $includeHidden = '',
                          $stripBrowser = null) {
-    global $user;
+    global $user, $admin;
     BuildLocations($locations);
     // drop the main index of any hidden locations so they don't show up in the map view
     foreach ($locations as $name => &$locRef) {
@@ -810,11 +812,11 @@ function FilterLocations(&$locations, $includeHidden = '',
         }
       }
       unset($locRef['hidden']);
-      
+
       // see if the location is restricted
       if (isset($locations[$name]) && isset($locRef['restricted'])) {
         $remove = true;
-        if (isset($_COOKIE['google_email']) || isset($user)) {
+        if (($admin && isset($_COOKIE['google_email'])) || isset($user)) {
           $currentUser = isset($_COOKIE['google_email']) ? trim($_COOKIE['google_email']) : $user;
           $userLen = strlen($currentUser);
           $users = explode(',', $locRef['restricted']);
@@ -961,23 +963,25 @@ function FilterLocations(&$locations, $includeHidden = '',
 * @param mixed $locations
 * @param mixed $config
 */
-function GetLocationFromConfig(&$locations, $config)
-{
-    $ret = null;
+function GetLocationFromConfig(&$locations, $config) {
+  $ret = null;
 
-    foreach($locations as $location => &$values)
-        foreach($values as $cfg)
-            if( $cfg == $config )
-            {
-                $ret = $location;
-                break 2;
-            }
+  foreach($locations as $location => &$values) {
+    if (isset($values) && is_array($values) && count($values)) {
+      foreach($values as $cfg) {
+        if( !strcmp($cfg, $config) ) {
+          $ret = $location;
+          break 2;
+        }
+      }
+    }
+  }
 
-    return $ret;
+  return $ret;
 }
 
 /**
-* Run through the location selections and build the default selections (instead of doing this in javascript)
+* Run through the location selections and build the default selections (instead of doing this in JavaScript)
 *
 * @param mixed $locations
 */
@@ -1006,8 +1010,11 @@ function ParseLocations(&$locations) {
     $currentLoc = null;
     if (array_key_exists('cfg', $_COOKIE))
         $currentLoc = GetLocationFromConfig($locations, $_COOKIE["cfg"] );
+    if (isset($_REQUEST["cfg"])) {
+        $currentLoc = GetLocationFromConfig($locations, $_REQUEST["cfg"] );
+    }
     if ((!$currentLoc || !isset($loc['locations'][$currentLoc])) && isset($locations['locations']['default'])) {
-        // nope, try thee default
+        // nope, try the default
         $currentLoc = $locations['locations']['default'];
     }
     if (!$currentLoc || !isset($loc['locations'][$currentLoc])) {
@@ -1042,6 +1049,10 @@ function ParseLocations(&$locations) {
         $currentBrowser = str_replace(' ', '', $locations[$_COOKIE["cfg"]]['browser']);
         $currentConfig = $_COOKIE["cfg"];
     }
+    if (isset($_REQUEST["cfg"]) && isset($locations[$_REQUEST["cfg"]])) {
+        $currentBrowser = str_replace(' ', '', $locations[$_REQUEST["cfg"]]['browser']);
+        $currentConfig = $_REQUEST["cfg"];
+    }
     if (!strlen($currentBrowser) || !isset($loc['browsers'][$currentBrowser])) {
         // try the browser from the default config
         $cfg = $locations[$currentLoc]['default'];
@@ -1057,6 +1068,9 @@ function ParseLocations(&$locations) {
             break;
         }
     }
+    if (isset($_REQUEST['browser']) && isset($loc['browsers'][$_REQUEST['browser']]))
+      $currentBrowser = $_REQUEST['browser'];
+
     $loc['browsers'][$currentBrowser]['selected'] = true;
 
     // build the list of connection types
@@ -1149,32 +1163,28 @@ function GetTestInfoHtml($includeScript = true)
     $run = null;
     if (array_key_exists('run', $_REQUEST))
       $run = intval($_REQUEST['run']);
-    if (isset($run) &&
-        array_key_exists('testinfo', $test) &&
-        array_key_exists('test_runs', $test['testinfo']) &&
-        array_key_exists($run, $test['testinfo']['test_runs']) &&
-        array_key_exists('tester', $test['testinfo']['test_runs'][$run]))
+    if (isset($run) && isset($test) && is_array($test) && isset($test['testinfo']['test_runs'][$run]['tester']))
       $html .= 'Tester: ' . $test['testinfo']['test_runs'][$run]['tester'] . '<br>';
-    elseif (isset($test['testinfo']['tester']) )
+    elseif (isset($test) && is_array($test) && isset($test['testinfo']['tester']) )
       $html .= 'Tester: ' . $test['testinfo']['tester'] . '<br>';
     if( $dom )
         $html .= 'DOM Element: <b>' . htmlspecialchars($dom) . '</b><br>';
     if( $test['test']['fvonly'] )
         $html .= '<b>First View only</b><br>';
-    if( (int)$test['test']['runs'] > 1 )
+    if( isset($test['test']['runs']) && ((int)$test['test']['runs'] > 1) )
         $html .= 'Test runs: <b>' . $test['test']['runs'] . '</b><br>';
-    if( array_key_exists('authenticated', $test['test']) && (int)$test['test']['authenticated'] == 1)
+    if( isset($test['test']['authenticated']) && (int)$test['test']['authenticated'] == 1)
         $html .= '<b>Authenticated: ' . htmlspecialchars($login) . '</b><br>';
     if (isset($test['testinfo']['addCmdLine']) && strlen($test['testinfo']['addCmdLine']))
         $html .= '<b>Command Line: ' . htmlspecialchars($test['testinfo']['addCmdLine']) . '</b><br>';
-    if( array_key_exists('testinfo', $test) && array_key_exists('connectivity', $test['testinfo']) && !strcasecmp($test['testinfo']['connectivity'], 'custom') )
+    if( isset($test['testinfo']['connectivity']) && !strcasecmp($test['testinfo']['connectivity'], 'custom') )
     {
         $html .= "<b>Connectivity:</b> {$test['testinfo']['bwIn']}/{$test['testinfo']['bwOut']} Kbps, {$test['testinfo']['latency']}ms Latency";
         if( $test['testinfo']['plr'] )
             $html .= ", {$test['testinfo']['plr']}% Packet Loss";
         $html .= '<br>';
     }
-    if( isset($test['testinfo']) && strlen($test['testinfo']['script']) )
+    if( isset($test['testinfo']['script']) && strlen($test['testinfo']['script']) )
     {
         $show = false;
         if ($includeScript) {
@@ -1189,7 +1199,7 @@ function GetTestInfoHtml($includeScript = true)
         {
             $html .= '<p><a href="javascript:void(0)" id="script_in_results">Script <span class="arrow"></span></a></p>';
             $html .= '<div id="script_in_results-container" class="hidden">';
-            $html .= '<pre>' . $test['testinfo']['script'] . '</pre>';
+            $html .= '<pre>' . htmlspecialchars($test['testinfo']['script']) . '</pre>';
             $html .= '</div>';
         }
         else
@@ -1199,7 +1209,7 @@ function GetTestInfoHtml($includeScript = true)
 }
 
 /**
-* Append the provided query param onto the provided url (handeling ? vs &)
+* Append the provided query param onto the provided URL (handeling ? vs &)
 *
 * @param mixed $entry
 */
@@ -1240,26 +1250,23 @@ function FixUrlSlash($url)
 function RestoreTest($id)
 {
   global $userIsBot;
+  global $DISABLE_RESTORE;
   $ret = false;
-  if (!$userIsBot && ValidateTestId($id)) {
+  if (!$DISABLE_RESTORE && !$userIsBot && ValidateTestId($id)) {
     $testPath = './' . GetTestPath($id);
-    // Only trigger a restore if the directory for the test doesn't exist
-    if (!is_file("$testPath/testinfo.ini")) {
+    // Only trigger a restore if the test info is not valid
+    $testInfo = GetTestInfo($id);
+    if (!$testInfo) {
       $archive_dir = GetSetting('archive_dir');
       $archive_s3_url = GetSetting('archive_s3_url');
       $archive_s3_server = GetSetting('archive_s3_server');
       if (($archive_dir && strlen($archive_dir)) ||
           ($archive_s3_url && strlen($archive_s3_url)) ||
           ($archive_s3_server && strlen($archive_s3_server))) {
-        $restore = false;
-        $testInfo = GetTestInfo($id);
-        if (!$testInfo)
-          $restore = true;
-
-        if( $restore )
+        $ret = RestoreArchive($id);
+        // Try a second time in case of a transient error
+        if (!$ret)
           $ret = RestoreArchive($id);
-        else
-          $ret = true;
       } else {
         $ret = true;
       }
@@ -1420,7 +1427,7 @@ function GetQueueLengths($location) {
         $queues[$priority] += count($q);
     }
   }
-  
+
   return $queues;
 }
 
@@ -1540,7 +1547,7 @@ function AddTestJob($location, $job, $test, $testId) {
 function AddJobFile($location, $workDir, $file, $priority, $queue_limit = 0)
 {
   $ret = false;
-  
+
   $use_beanstalk = false;
   $beanstalkd = GetSetting('beanstalkd');
   if ($beanstalkd && strlen($beanstalkd)) {
@@ -1720,10 +1727,11 @@ function GetTestJob($location, &$file, $workDir, &$priority, $tester = null, $te
               if (isset($file)) {
                 unset($queue[$priority][$index]);
                 $modified = true;
-                if (is_file("$workDir/$file"))
+                if (is_file("$workDir/$file")) {
                   break;
-                else
+                } else {
                   unset($file);
+                }
               }
             }
           }
@@ -1736,7 +1744,7 @@ function GetTestJob($location, &$file, $workDir, &$priority, $tester = null, $te
       }
       Unlock($lock);
     }
-    
+
     if (!isset($file)) {
       $beanstalkd = GetSetting('beanstalkd');
       if ($beanstalkd && strlen($beanstalkd)) {
@@ -1764,8 +1772,12 @@ function GetTestJob($location, &$file, $workDir, &$priority, $tester = null, $te
     }
     if (isset($file) && strlen($file) && is_file("$workDir/$file")) {
       $data = file_get_contents("$workDir/$file");
-      if (isset($data) && $data !== FALSE && strlen($data))
+      if (isset($data) && $data !== FALSE && strlen($data)) {
         $test_job = $data;
+      } else {
+        unlink("$workDir/$file");
+        unset($file);
+      }
     }
   }
 
@@ -1799,8 +1811,14 @@ function FindJobPosition($location, $workDir, $testId)
       }
     }
     $beanstalkd = GetSetting('beanstalkd');
-    if (!$found && $beanstalkd && strlen($beanstalkd))
-      $found = true;
+    if (!$found && $beanstalkd && strlen($beanstalkd)) {
+      require_once('./lib/beanstalkd/pheanstalk_init.php');
+      $pheanstalk = new Pheanstalk_Pheanstalk($beanstalkd);
+      $stats = $pheanstalk->stats();
+      if ($stats['current-jobs-ready'] > 0) {
+        $found = true;
+      }
+    }
   }
 
   if( !$found )
@@ -1828,7 +1846,7 @@ function LoadJobQueue($workDir, &$queue)
           if (is_array($queue)) {
             $empty = true;
             foreach ($queue as &$p) {
-              if (count($p)) {
+              if (is_array($p) && isset($p[0]) && (strpos($p[0], "AffinityTester") == FALSE)) {
                 $empty = false;
                 break;
               }
@@ -1890,7 +1908,7 @@ function SaveJobQueue($workDir, &$queue)
 *
 * @param mixed $dir
 */
-function GetTesters($locationId, $includeOffline = false) {
+function GetTesters($locationId, $includeOffline = false, $include_sensitive = true) {
   $location = array();
   $dir = __DIR__ . "/tmp/testers-$locationId";
   if (is_dir($dir)) {
@@ -1899,6 +1917,7 @@ function GetTesters($locationId, $includeOffline = false) {
     $testers = array();
     $delete = array();
     $files = glob("$dir/*.json.gz");
+    $max_tester_time = min(max(GetSetting('max_tester_minutes', 60), 5), 120);
     foreach ($files as $file) {
       $tester_info = json_decode(gz_file_get_contents($dir . '/' . basename($file, '.gz')), true);
       if (isset($tester_info) && is_array($tester_info)) {
@@ -1912,14 +1931,14 @@ function GetTesters($locationId, $includeOffline = false) {
         }
 
         // Clean up any old testers (> 1 hour since we've seen them)
-        if ($elapsed > 60) {
+        if ($elapsed > $max_tester_time) {
           $delete[] = $file;
         } else {
           $testers[$tester_info['id']] = $tester_info;
         }
       }
     }
-    
+
     $delete_count = count($delete);
     if ($delete_count) {
       // Keep at least one around so we can tell how long the location has been offline
@@ -1929,7 +1948,7 @@ function GetTesters($locationId, $includeOffline = false) {
         unlink($delete[$i]);
       }
     }
-    
+
     if (count($testers)) {
       ksort($testers);
       $location['testers'] = array();
@@ -1941,6 +1960,7 @@ function GetTesters($locationId, $includeOffline = false) {
                          'ip' => @$tester['ip'],
                          'version' => @$tester['ver'],
                          'freedisk' => @$tester['freedisk'],
+                         'upminutes' => @$tester['upminutes'],
                          'ie' => @$tester['ie'],
                          'winver' => @$tester['winver'],
                          'isWinServer' => @$tester['isWinServer'],
@@ -1950,6 +1970,14 @@ function GetTesters($locationId, $includeOffline = false) {
                          'offline' => @$tester['offline'],
                          'screenwidth' => @$tester['screenwidth'],
                          'screenheight' => @$tester['screenheight']);
+          if ($include_sensitive) {
+             $entry['test'] = @$tester['test'];
+          }
+
+          if (isset($tester['browsers'])) {
+             $entry['browsers'] = @$tester['browsers'];
+          }
+
           $entry['rebooted'] = isset($tester['rebooted']) ? $tester['rebooted'] : false;
 
           if (isset($tester['cpu']) && is_array($tester['cpu']) && count($tester['cpu']))
@@ -1957,7 +1985,7 @@ function GetTesters($locationId, $includeOffline = false) {
 
           if (isset($tester['errors']) && is_array($tester['errors']) && count($tester['errors']) > 50)
             $entry['errors'] = round(array_sum($tester['errors']) / count($tester['errors']));
-          
+
           // last time it checked in
           if (isset($tester['updated'])) {
             $updated = $tester['updated'];
@@ -1982,7 +2010,7 @@ function GetTesters($locationId, $includeOffline = false) {
     if (isset($elapsed_time))
       $location['elapsed'] = (int)$elapsed_time;
   }
-    
+
   if (isset($location['elapsed']) && $location['elapsed'] < 60)
     $location['status'] = 'OK';
   else
@@ -2008,7 +2036,7 @@ function UpdateTester($location, $tester, $testerInfo = null, $cpu = null, $erro
     $tester_info = json_decode(gz_file_get_contents($tester_file), true);
   if (!isset($tester_info) || !is_array($tester_info))
     $tester_info = array();
-    
+
   $now = time();
   $tester_info['updated'] = $now;
   if (!isset($tester_info['first_contact']))
@@ -2016,10 +2044,10 @@ function UpdateTester($location, $tester, $testerInfo = null, $cpu = null, $erro
 
   if (isset($rebooted))
     $tester_info['rebooted'] = $rebooted;
-    
+
   // Update the CPU Utilization
   if (isset($cpu) && $cpu > 0) {
-    if (!isset($tester_info['cpu']))
+    if (!isset($tester_info['cpu']) || !is_array($tester_info['cpu']))
       $tester_info['cpu'] = array();
     $tester_info['cpu'][] = $cpu;
     if (count($tester_info['cpu']) > 100)
@@ -2028,7 +2056,7 @@ function UpdateTester($location, $tester, $testerInfo = null, $cpu = null, $erro
 
   // keep track of the success/error count
   if (isset($error)) {
-    if (!isset($tester_info['errors']))
+    if (!isset($tester_info['errors']) || !is_array($tester_info['errors']))
       $tester_info['errors'] = array();
     $tester_info['errors'][] = strlen($error) ? 100 : 0;
     if (count($tester_info['errors']) > 100)
@@ -2039,13 +2067,15 @@ function UpdateTester($location, $tester, $testerInfo = null, $cpu = null, $erro
     // keep track of the FIRST idle request as the last work time so we can have an accurate "idle time"
     if (isset($testerInfo['test']) && strlen($testerInfo['test']))
       $tester_info['last'] = $now;
+    if (isset($tester_info['test']) && strlen($tester_info['test']))
+      $tester_info['last'] = $now;
 
     // update any other data passed in for the tester
     foreach ($testerInfo as $key => $value)
       $tester_info[$key] = $value;
   }
   $tester_info['id'] = $tester;
-  
+
   gz_file_put_contents($tester_file, json_encode($tester_info));
 }
 
@@ -2089,8 +2119,9 @@ function Lock($name, $blocking = true, $maxLockSeconds = 300) {
       $lockFile = $tmpdir . '/lock-' . sha1($name) . '.lock';
     $start = microtime(true);
     do {
-      $file = @fopen($lockFile, 'x');
+      $file = @fopen($lockFile, 'xb');
       if ($file !== false) {
+        fwrite($file, json_encode(debug_backtrace(), JSON_PRETTY_PRINT | JSON_PARTIAL_OUTPUT_ON_ERROR));
         fclose($file);
         $lock = array('name' => $name);
         $lock['file'] = $lockFile;
@@ -2100,7 +2131,7 @@ function Lock($name, $blocking = true, $maxLockSeconds = 300) {
         if ($modified && time() - $modified > $maxLockSeconds) {
           @unlink($lockFile);
         } elseif ($blocking) {
-          usleep(100000);
+          usleep(rand(100000, 150000));
         }
       }
       $elapsed = microtime(true) - $start;
@@ -2134,20 +2165,8 @@ function UnLock(&$lock) {
   }
 }
 
-function LockTest($testIdOrPath) {
-  $lock = null;
-  $testPath = $testIdOrPath;
-  if (strpos($testPath, '/') === false) {
-    $id = $testPath;
-    $testPath = '';
-    if (ValidateTestId($id))
-      $testPath = './' . GetTestPath($id);
-  }
-  if (strlen($testPath) && is_dir($testPath)) {
-    $testPath = realpath($testPath);
-    $lock = Lock("Test $testPath");
-  }
-  return $lock;
+function LockTest($id) {
+  return Lock("Test $id");
 }
 
 function UnlockTest(&$testLock) {
@@ -2217,7 +2236,7 @@ function xml_entities($text, $charset = 'UTF-8')
     // Note: &apos; is useless in UTF-8 or in UTF-16
     $arr_xml_special_char = array("&quot;","&amp;","&apos;","&lt;","&gt;");
 
-    // Building the regex string to exclude all strings with xml special char
+    // Building the regex string to exclude all strings with XML special char
     $arr_xml_special_char_regex = "(?";
     foreach($arr_xml_special_char as $key => $value)
         $arr_xml_special_char_regex .= "(?!$value)";
@@ -2246,7 +2265,7 @@ function json_response(&$response) {
 
     if( array_key_exists('r', $_REQUEST) && strlen($_REQUEST['r']) )
         $ret['requestId'] = $_REQUEST['r'];
-    
+
     $out = null;
     if (version_compare(phpversion(), '5.4.0') >= 0 &&
         array_key_exists('pretty', $_REQUEST) &&
@@ -2261,9 +2280,9 @@ function json_response(&$response) {
       $jsonLib = new Services_JSON();
       $out = $jsonLib->encode($response);
     }
-    
+
     echo $out;
-    
+
     if( isset($_REQUEST['callback']) && strlen($_REQUEST['callback']) )
         echo ");";
 }
@@ -2290,6 +2309,10 @@ function ValidateTestId(&$id) {
   } else {
     $id = '';
   }
+  // Exit if we are trying to operate on an invalid ID
+  if (!$valid) {
+    exit(0);
+  }
   return $valid;
 }
 
@@ -2313,6 +2336,9 @@ function formatMsInterval($val, $digits) {
 * @param mixed $path
 */
 function SecureDir($path) {
+    if (GetSetting('no_secure'))
+      return;
+
     $files = scandir($path);
     foreach ($files as $file) {
         $filepath = "$path/$file";
@@ -2429,7 +2455,7 @@ function http_post_raw($url, $body) {
 * Generate a shard key to better spread out the test results
 *
 */
-function ShardKey($test_num) {
+function ShardKey($test_num, $locationID = null) {
   $key = '';
 
   $bucket_size = GetSetting('bucket_size');
@@ -2455,7 +2481,14 @@ function ShardKey($test_num) {
       $key .= '_';
     }
   }
-  
+
+  // Add the location ID if we are using one
+  if (isset($locationID) && strlen($key)) {
+    $locationID = preg_replace('/[^a-zA-Z0-9]/', '', $locationID);
+    if (strlen($locationID))
+      $key = $locationID . 'x' . $key;
+  }
+
   // add the server ID if we are using one
   if (strlen($key)) {
     $server = GetSetting('serverID');
@@ -2470,12 +2503,12 @@ function ShardKey($test_num) {
 }
 
 /**
-* Send a request with a really short timeout to fire an async processing task
+* Send a request with a really short timeout to fire an async-processing task
 *
 * @param mixed $relative_url
 */
 function SendAsyncRequest($relative_url) {
-  $protocol = ((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] == 'on') || (isset($_SERVER['HTTP_SSL']) && $_SERVER['HTTP_SSL'] == 'On')) ? 'https' : 'http';
+  $protocol = getUrlProtocol();
   $url = "$protocol://{$_SERVER['HTTP_HOST']}$relative_url";
   $local = GetSetting('local_server');
   if ($local)
@@ -2501,10 +2534,15 @@ function SendAsyncRequest($relative_url) {
 * @param array $line_data The data to turn into a log line
 */
 function makeLogLine($line_data) {
+    foreach ($line_data as $key => $value) {
+      if (strpos($value, "\t") !== false) {
+        $line_data[$key] = str_replace("\t", '', $value);
+      }
+    }
     $log = $line_data['date'] . "\t" . $line_data['ip'] . "\t0" . "\t0";
     $log .= "\t" . $line_data['guid'] . "\t" . $line_data['url'] . "\t". $line_data['location'] . "\t" . $line_data['private'];
     $log .= "\t". $line_data['testUID'] . "\t" . $line_data['testUser'] . "\t" . $line_data['video'] . "\t" . $line_data['label'];
-    $log .= "\t". $line_data['owner'] . "\t". $line_data['key'] . "\t" . $line_data['count'] . "\r\n";
+    $log .= "\t". $line_data['owner'] . "\t". $line_data['key'] . "\t" . $line_data['count'] . "\t" . $line_data['priority'] . "\r\n";
 
     return $log;
 }
@@ -2549,7 +2587,7 @@ function tokenizeLogLine($line) {
 }
 
 /**
-* Update label for a test in a sqlite DB.
+* Update label for a test in a SQLite DB.
 *
 * @param string $test_guid  The ID of the test to update
 * @param string $label      The new label
@@ -2581,7 +2619,7 @@ function updateLabel($test_guid, $label, $test_uid, $cur_user, $test_owner) {
 * Get an updated test label
 *
 * @param string $test_guid    The ID of the test to get the label for
-* @param string $current_user The current user that is trying to fetch the label
+* @param string $current_user The current user trying to fetch the label
 */
 function getLabel($test_guid, $current_user) {
     if (!class_exists("SQLite3")) {
@@ -2605,7 +2643,7 @@ function getLabel($test_guid, $current_user) {
 }
 
 /**
-*   Generate a unique Id
+*   Generate a unique ID
 */
 function uniqueId(&$test_num) {
     $id = NULL;
@@ -2666,12 +2704,12 @@ function NumToString($num) {
 
 /**
 * Load the testinfo for the given test (can be ID or path)
-* 
+*
 * @param mixed $testPath
 */
 function GetTestInfo($testIdOrPath) {
   $testInfo = false;
-  
+
   if (isset($testIdOrPath) && strlen($testIdOrPath)) {
     $testPath = $testIdOrPath;
     if (strpos($testPath, '/') === false) {
@@ -2680,7 +2718,7 @@ function GetTestInfo($testIdOrPath) {
       if (ValidateTestId($id))
         $testPath = './' . GetTestPath($id);
     }
-      
+
     // TODO(pmeenan): cache the test info to prevent multiple disk
     // reads (need to deal with read-write-read sequences though)
     if (gz_is_file("$testPath/testinfo.json")) {
@@ -2692,10 +2730,10 @@ function GetTestInfo($testIdOrPath) {
       }
     }
   }
-  
+
   if (!isset($testInfo) || !is_array($testInfo))
     $testInfo = false;
-  
+
   return $testInfo;
 }
 
@@ -2742,7 +2780,7 @@ function CopyArrayEntry(&$src, &$dest, $srcEntry, $destEntry = null) {
   if (!isset($destEntry))
     $destEntry = $srcEntry;
   if (array_key_exists($srcEntry, $src))
-    $dest[$destEntry] = $src[$srcEntry];  
+    $dest[$destEntry] = $src[$srcEntry];
 }
 
 function IsTestRunComplete($run, &$testInfo) {
@@ -2761,7 +2799,7 @@ function IsTestRunComplete($run, &$testInfo) {
 }
 
 function logTestMsg($testIdOrPath, $message) {
-  if (isset($testIdOrPath) && strlen($testIdOrPath) && strlen($message)) {
+  if (!GetSetting('disable_test_log') && isset($testIdOrPath) && strlen($testIdOrPath) && strlen($message)) {
     $testPath = $testIdOrPath;
     if (strpos($testPath, '/') === false) {
       $id = $testPath;
@@ -2814,79 +2852,43 @@ function numRunsFromTestInfo($testInfo) {
 }
 
 /**
-* Update the safe browsing list (if configured)
-* 
-*/
-function SBL_Update() {
-  $key = GetSetting('sbl_api_key');
-  $has_apcu = false;
-  $has_apc = false;
-  if (function_exists('apcu_fetch') && function_exists('apcu_store'))
-    $has_apcu = true;
-  elseif (function_exists('apc_fetch') && function_exists('apc_store'))
-    $has_apc = true;
-  if ($key && strlen($key) && ($has_apcu || $has_apc)) {
-    if ($has_apcu)
-      $next_update = apcu_fetch('sbl_next_update');
-    else
-      $next_update = apc_fetch('sbl_next_update');
-    if (!$next_update || time() > $next_update) {
-      $db = __DIR__ . '/dat/sbl.db';
-      if (is_file($db)) {
-        $db = realpath($db);
-      } else {
-        file_put_contents($db, '');
-        $db = realpath($db);
-        unlink($db);
-      }
-      $cmd = "gglsbl_client.py --api-key $key --db-path \"$db\" --onetime --debug 2>&1";
-      exec($cmd, $out);
-      $next_update = 0;
-      if (isset($out) && is_array($out) && count($out)) {
-        $updated = 0;
-        $seconds = 0;
-        foreach($out as $line) {
-          if (stripos($line, "Storing sub chunk") !== false) {
-            $updated++;
-          } elseif (preg_match('/Next query will be delayed (?P<seconds>[0-9]+) seconds/', $line, $matches)) {
-            $seconds = intval($matches['seconds']);
-          }
-        }
-        if ($updated)
-          $seconds = 0;
-        $next_update = time() + $seconds;
-      }
-      if ($has_apcu)
-        apcu_store('sbl_next_update', $next_update);
-      else
-        apc_store('sbl_next_update', $next_update);
-    } else {
-      $seconds = $next_update - time();
-    }
-  }
-}
-
-/**
 * Check an URL against the SBL
-* 
+*
 * @param mixed $url
 */
 function SBL_Check($url, &$message) {
   $ok = true;
-  $db = __DIR__ . '/dat/sbl.db';
   $key = GetSetting('sbl_api_key');
-  if ($key && strlen($key) && is_file($db)) {
-    $db = realpath($db);
-    $url = escapeshellarg($url);
-    $cmd = "gglsbl_client.py --api-key $key --db-path \"$db\" --check-url $url 2>&1";
-    exec($cmd, $out);
-    if (isset($out) && is_array($out) && count($out)) {
-      foreach($out as $line) {
-        if (stripos($line, 'is blacklisted') !== false) {
-          $ok = false;
-          break;
-        }
-      }
+  if ($key && strlen($key)) {
+    $check = array(
+      'client' => array(
+        'clientId' => 'WebPageTest',
+        'clientVersion' => '1.0'
+      ),
+      'threatInfo' => array(
+        'threatTypes' => array('MALWARE'),
+        'platformTypes' => array('ALL_PLATFORMS'),
+        'threatEntryTypes' => array('URL'),
+        'threatEntries' => array(array('url' => $url))
+      )
+    );
+    $data = json_encode($check);
+    $api_url = "https://safebrowsing.googleapis.com/v4/threatMatches:find?key=$key";
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $api_url);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, array("Content-Type: application/json", 'Content-Length: ' . strlen($data)));
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+    $raw_response = curl_exec($ch);
+    $response = json_decode($raw_response, true);
+    curl_close ($ch);
+    if (isset($response) && is_array($response) && isset($response['matches'][0]['threatType'])) {
+      $ok = false;
     }
   }
   return $ok;
@@ -2894,7 +2896,7 @@ function SBL_Check($url, &$message) {
 
 /**
 * Check to see if we can use the python visual metrics processing script
-* 
+*
 */
 function CheckPythonVisualMetrics(&$failures) {
   $ok = false;
@@ -3015,7 +3017,7 @@ function LookupError($error)
 /**
 * See if the system is running over the configured max load setting.
 * This allows for bailing out of some optional CPU-intensive operations.
-* 
+*
 */
 function OverSystemLoad() {
   $over = false;
@@ -3032,7 +3034,7 @@ function OverSystemLoad() {
 
 /**
 * Make sure everything is in utf-8 format
-* 
+*
 * @param mixed $mixed
 */
 function MakeUTF8($mixed) {
@@ -3041,7 +3043,68 @@ function MakeUTF8($mixed) {
       $mixed[$key] = MakeUTF8($value);
     }
   } elseif (is_string($mixed)) {
-    return utf8_encode($mixed);
+    $encoding = mb_detect_encoding($mixed, mb_detect_order(), true);
+    if ($encoding == FALSE) {
+      return '';
+    }
+    if ($encoding != 'UTF-8') {
+      return mb_convert_encoding($mixed, 'UTF-8', $encoding);
+    }
   }
   return $mixed;
+}
+
+/**
+ * Checks if the fileName contains invalid characters or has an invalid extension
+ * @param $fileName string The filename to check
+ * @return bool true if accepted for an upload, false otherwise
+ */
+function validateUploadFileName($fileName) {
+  if (strpos($fileName, '..') !== false ||
+      strpos($fileName, '/') !== false ||
+      strpos($fileName, '\\') !== false) {
+    return false;
+  }
+  $parts = pathinfo($fileName);
+  $ext = strtolower($parts['extension']);
+  // TODO: shouldn't this be a whitelist?
+  return !in_array($ext, array('php', 'pl', 'py', 'cgi', 'asp', 'js', 'rb', 'htaccess', 'jar'));
+}
+
+function SendCallback($testInfo) {
+  if (isset($testInfo) && isset($testInfo['callback']) && strlen($testInfo['callback'])) {
+    $send_callback = true;
+    $testId = $testInfo['id'];
+    if (array_key_exists('batch_id', $testInfo) && strlen($testInfo['batch_id'])) {
+      require_once('testStatus.inc');
+      $testId = $testInfo['batch_id'];
+      $status = GetTestStatus($testId);
+      $send_callback = false;
+      if (array_key_exists('statusCode', $status) && $status['statusCode'] == 200)
+        $send_callback = true;
+    }
+    if ($send_callback) {
+      $url = $testInfo['callback'];
+      if( strncasecmp($url, 'http', 4) )
+        $url = "http://" . $url;
+      if( strpos($url, '?') == false )
+        $url .= '?';
+      else
+        $url .= '&';
+      $url .= "id=$testId";
+      if (function_exists('curl_init')) {
+        $c = curl_init();
+        curl_setopt($c, CURLOPT_URL, $url);
+        curl_setopt($c, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($c, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($c, CURLOPT_CONNECTTIMEOUT, 10);
+        curl_setopt($c, CURLOPT_TIMEOUT, 10);
+        curl_exec($c);
+        curl_close($c);
+      } else {
+        $context = stream_context_create(array('http' => array('header'=>'Connection: close', 'timeout' => 10)));
+        file_get_contents($url, false, $context);
+      }
+    }
+  }
 }

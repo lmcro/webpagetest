@@ -14,9 +14,6 @@ publishTo=www.webpagetest.org
 ;Uncomment map=1 if you want to enable the map-based picker
 ;map=1
 
-; Integrate with cloudshark
-tcpdump_view="http://cloudshark.org/view?url="
-
 ; Log in with Google
 ;google_oauth_client_id=<client ID>
 ;google_oauth_client_secret=<secret>
@@ -24,9 +21,11 @@ tcpdump_view="http://cloudshark.org/view?url="
 ; Uncomment to enable drawing of vertical lines in the waterfalls for all user timing marks
 ;waterfall_show_user_timing=1
 
-; Uncomment to use mime-colored waterfalls as the default
-;mime_waterfalls=1
+; Comment-out to use classic-colored waterfalls as the default
+mime_waterfalls=1
 
+; Uncomment to disable the testlog in the UI
+;disableTestlog=1
 
 ; *********************
 ; Test options/defaults
@@ -39,14 +38,29 @@ fullSizeVideoOn=1
 ;Full Size Video - default checkbox state - ticked (1) or unticked (0)
 fullSizeVideoDefault=0
 
+; Disable all video capture and processing when tests do not opt for video.
+; Usually the agents will still capture video to calculate the visual metrics
+; but the video will not be uploaded. With strict_video enabled, tests without
+; video capture will not get visual metrics.
+;strict_video=1
+
 ; Run tests concurrently across test machines
 ;shard_tests=1
 
 ; Maximum number of runs allowed per test
 maxruns=9
 
+; Default timeout for each step of a test (in seconds)
+;step_timeout=120
+
 ; Maximum amount of time for a test run (if requested by timeout=X)
 maxtime=600
+
+; Time limit for all steps in a single test run.
+;run_time_limit=180
+
+; Force individual runs to end if they didn't complete.
+max_run_minutes=60
 
 ; Maximum server load to allow when rendering video on the server
 render_max_load=8
@@ -60,8 +74,14 @@ allowNonFQDN=0
 ; image quality (defaults to 30)
 ;iq=75
 
-;save png full-resolution screen shots
+;save png full-resolution screenshots
 ;pngss=1
+
+;Uncomment to disable the force "3G Fast" throttling applied to lighthouse tests.
+;lighthouseThrottle=1
+
+;Uncomment enable hero element times.
+;heroElementTimes=1
 
 ;Software identification string to include in the user agent string of tests
 ;UAModifier=PTST
@@ -76,6 +96,12 @@ enable_agent_processing=1
 ; Sets the maximum number of navigates in a script
 maxNavigateCount=20
 
+; Selects the metric to use for the median run (defaults to loadTime)
+; medianMetric=SpeedIndex
+
+; Block domains from all tests (space-delimited list)
+;blockDomains=ctldl.windowsupdate.com
+
 ; *************
 ; Server Config
 ; *************
@@ -88,6 +114,9 @@ maxNavigateCount=20
 ; This is mostly used when the pages are behind authentication and need another path
 ; for processing background tasks.
 ;local_server=http://127.0.0.1
+
+; Default API key to use across all locations
+;location_key=AlphaNumericKey
 
 ; disable gzip compressing the result text files
 ;nogzip=1
@@ -114,9 +143,6 @@ maxNavigateCount=20
 ; (assumes a git clone and just runs "git pull origin master" as the web user).
 ;gitUpdate=1
 
-; Automatically update test agents hourly (pulls the latest test agents from the provided server)
-;agentUpdate=http://cdn.webpagetest.org/
-
 ; If an android device is connected to the server, scrape updated APK's off of the
 ; device to be installed on the test agents automatically (for cases where
 ; play auto-updating doesn't work - i.e. reverse-tethered devices)
@@ -127,6 +153,16 @@ maxNavigateCount=20
 ; Must be alpha-numeric and will end up as part of the hash string in the test ID:
 ; YYMMDD_<serverID>hash_xxx
 ;serverID=A
+
+; For basic authentication with WPT server
+;ba_username=username
+;ba_password=password
+;validcertificate=1
+
+; For integration with invisible reCAPTCHA
+;recaptcha_site_key=
+;recaptcha_secret_key=
+
 
 ; ***********************
 ; Test result integration
@@ -166,20 +202,20 @@ maxNavigateCount=20
 ;logTestRequests=/var/log/webpagetest/requests.log
 ;logPrivateTests=0
 
-;
-; showslow (beacon rate is a percent of results to allow for sampling)
-;
-;showslow=http://www.showslow.com
-;beaconRate=100
-;showslow_key=<your showslow API key>
-
+; Default URL to ping when the test is complete
+;ping_back_url=http://pingbackurl.com
 
 ; **************
 ; Test Archiving
 ; **************
 
-; archiving to local storage - directory to archive test files (must include trailing slash)
-;archive_dir=/data/archive/
+; archiving to local storage
+; archive_dir - directory to archive test files (must include trailing slash)
+; archive_kept_days - The tests in archive_dir that are more than archive_kept_days
+;           days older will be deleted. If archive_kept_days is not defined, archived
+;           tests will be kept forever.
+; archive_dir=/data/archive/
+; archive_kept_days=365
 
 ; archiving to s3 (using the s3 protocol, not necessarily just s3)
 ;archive_s3_server=s3.amazonaws.com
@@ -187,6 +223,12 @@ maxNavigateCount=20
 ;archive_s3_secret=<secret>
 ;archive_s3_bucket=<bucket>
 ;archive_s3_url=http://s3.amazonaws.com/
+
+; s3 url style - valid options are 'vhost' or 'path'. The default is 'vhost'
+; example of s3 url styles:
+;   - vhost: http://<bucket>.<s3_server>/object
+;   - path: http://<s3_server>/<bucket>/object
+;archive_s3_urlstyle=vhost
 
 ;Number of days to keep tests locally before archiving
 ;archive_days=2
@@ -202,6 +244,10 @@ maxNavigateCount=20
 ;ec2_key=<access key>
 ;ec2_secret=<secret>
 
+; EC2 default instance size (defaults to m3.medium, c4.large is recommended).
+; Can be overridden in locations.ini for individual locations.
+;ec2_instance_size=c4.large
+
 ; Should we automatically delete any EBS volumes marked as "available"?
 ; This can be used to prevent orphaned volumes but only if the account
 ; doesn't expect to keep offline EBS volumes.
@@ -209,6 +255,24 @@ maxNavigateCount=20
 
 ; Start an EC2 instance for every X tests in the queue (up to the location max)
 ;EC2.ScaleFactor=100
+
+; Pass the private IP address of the server through user-data for auto-launch agents instead of public EIP
+;ec2_use_server_private_ip=1
+
+; !!! ONLY SET THIS FOR LINUX AGENTS !!!
+;
+; Number of minutes to let an instance run idle before terminating.  This
+; is only helpful for Linux agents, where EC2 gets billed per second, with a
+; minimum of 60 seconds.
+; https://aws.amazon.com/about-aws/whats-new/2017/10/announcing-amazon-ec2-per-second-billing/
+;
+; Be careful, it is possible to set this too low.  It needs to be longer than
+; the time it takes for AWS to spin up a new instance and wptagent to start
+; processing tests.
+;
+; Windows is still billed hourly.  Do not set this if you are using Windows
+; agents.
+;EC2.IdleTerminateMinutes=15
 
 ; Default location when using EC2 auto-scaling - this setting is required for auto-scaling
 ;EC2.default=us-east-1
@@ -221,8 +285,8 @@ maxNavigateCount=20
 ;EC2.us-east-1.min=0
 ;EC2.us-east-1.max=1
 
-; Per-location Security Group and Subnet IDs to enable launching into VPCs 
-; (note that this will pin your instances to the availability zone associated with 
+; Per-location Security Group and Subnet IDs to enable launching into VPCs
+; (note that this will pin your instances to the availability zone associated with
 ; the subnet). This is required only if you do not have a default VPC.
 ;EC2.us-west-2.securityGroup=sg-a0011b223,sg-b1122c334
 ;EC2.us-west-2.subnetId=subnet-aaa0011bc1

@@ -162,7 +162,7 @@ class TestResultsHtmlTables {
     $out .=  "<th align=\"center\" class=\"empty\" valign=\"middle\"></th>\n";
     $out .=  "<th align=\"center\" valign=\"middle\">Waterfall</th>\n";
     if ($this->hasScreenshots) {
-      $out .=  '<th align="center" valign="middle">Screen Shot</th>';
+      $out .=  '<th align="center" valign="middle">Screenshot</th>';
     }
     if ($this->hasVideo) {
       $out .=  '<th align="center" valign="middle">Video</th>';
@@ -210,6 +210,7 @@ class TestResultsHtmlTables {
     $out .=  $this->_getTimelineLinks($stepResult);
     $out .=  $this->_getTraceLinks($stepResult);
     $out .=  $this->_getNetlogLinks($stepResult);
+    $out .=  $this->_getDebuglogLinks($stepResult);
     $out .=  '</td>';
     return $out;
   }
@@ -288,7 +289,7 @@ class TestResultsHtmlTables {
   private function _createScreenshotCell($stepResult, $even) {
     $urlGenerator = $stepResult->createUrlGenerator("", FRIENDLY_URLS);
     $class = $even ? 'class="even"' : '';
-    $onload = $this->screenshotDisplayed ? "" : " onload=\"markUserTime('aft.First Screen Shot')\"";
+    $onload = $this->screenshotDisplayed ? "" : " onload=\"markUserTime('aft.First Screenshot')\"";
     $screenShotUrl = $urlGenerator->resultPage("screen_shot") . "#step_" . $stepResult->getStepNumber();
     $thumbnailUrl = $urlGenerator->thumbnail("screen.jpg");
     $out = "<td align=\"center\" valign=\"middle\" $class>\n";
@@ -318,9 +319,9 @@ class TestResultsHtmlTables {
 
     $out = "<br><br>\n";
     $out .= "<a href=\"$downloadUrl\" title=\"Download Chrome Dev Tools Timeline\">Timeline</a>\n";
-    $out .= " (<a href=\"$viewUrl\" title=\"View Chrome Dev Tools Timeline\">view</a>)\n";
+    $out .= " (<a href=\"$viewUrl\" target=\"_blank\" title=\"View Chrome Dev Tools Timeline\">view</a>)\n";
     $out .= "<br>\n";
-    $out .= "<a href=\"$breakdownUrl\" title=\"View browser main thread activity by event type\">Processing Breakdown</a>";
+    $out .= "<a href=\"$breakdownUrl\" title=\"View browser main-thread activity by event type\">Processing Breakdown</a>";
     return $out;
   }
 
@@ -384,7 +385,7 @@ class TestResultsHtmlTables {
     $viewUrl = $urlGenerator->stepDetailPage("chrome/trace");
 
     $out = "<br><br><a href=\"$zipUrl\" title=\"Download Chrome Trace\">Trace</a>\n";
-    $out .= " (<a href=\"$viewUrl\" title=\"View Chrome Trace\">view</a>)\n";
+    $out .= " (<a href=\"$viewUrl\" target=\"_blank\" title=\"View Chrome Trace\">view</a>)\n";
     return $out;
   }
 
@@ -400,6 +401,25 @@ class TestResultsHtmlTables {
     $urlGenerator = $stepResult->createUrlGenerator("", FRIENDLY_URLS);
     $zipUrl = $urlGenerator->getGZip( $stepResult->createTestPaths("")->netlogFile());
     return "<br><br><a href=\"$zipUrl\" title=\"Download Network Log\">Net Log</a>";
+  }
+
+  /**
+   * @param TestStepResult $stepResult
+   * @return string Markup with links
+   */
+  private function _getDebuglogLinks($stepResult) {
+    $localPaths = $stepResult->createTestPaths();
+    if (!gz_is_file($localPaths->debugLogFile())) {
+      return "";
+    }
+    $urlGenerator = $stepResult->createUrlGenerator("", FRIENDLY_URLS);
+    $zipUrl = $urlGenerator->getGZip( $stepResult->createTestPaths("")->debugLogFile());
+    $ret = "<br><br><a href=\"$zipUrl\" title=\"Download Debug Log\">Debug Log</a>";
+    if (gz_is_file($localPaths->devtoolsFile())) {
+      $zipUrl = $urlGenerator->getGZip( $stepResult->createTestPaths("")->devtoolsFile());
+      $ret .= "<br><a href=\"$zipUrl\" title=\"Download Raw Devtools Events\">Devtools Events</a>";
+    }
+    return $ret;
   }
 
   /**

@@ -82,6 +82,7 @@ function SelectRequest(step, request) {
     var details='';
     var requestHeaders='';
     var responseHeaders='';
+    let json = '';
     $("#response-body-" + stepLabel).html('');
     try {
         if (wptBodyRequest !== undefined)
@@ -90,6 +91,7 @@ function SelectRequest(step, request) {
     }
     if (wptRequestData[stepLabel][request - 1] !== undefined) {
         var r = wptRequestData[stepLabel][request - 1];
+        json = JSON.stringify(r, null, 4);
         if (r['full_url'] !== undefined) {
             if (wptNoLinks) {
                 details += '<b>URL:</b> ' + htmlEncode(r['full_url']) + '<br>';
@@ -121,14 +123,18 @@ function SelectRequest(step, request) {
             details += ", weight " + htmlEncode(parseInt(r['http2_stream_weight']));
           if (r['http2_stream_dependency'] !== undefined)
             details += ", depends on " + htmlEncode(r['http2_stream_dependency']);
-          if (r['http2_stream_exclusive'] !== undefined && r['http2_stream_exclusive'] > 0)
+          if (r['http2_stream_exclusive'] !== undefined && (r['http2_stream_exclusive'] > 0 || r['http2_stream_exclusive'] === "True"))
             details += ", EXCLUSIVE";
           details += '<br>';
         }
         if (r['was_pushed'] !== undefined && r['was_pushed'] > 0)
-            details += '<b>SERVER PUSHED</b>';
+            details += '<b>SERVER PUSHED</b><br>';
+        if (r['request_id'] !== undefined && r['request_id'] !== null && r['request_id'].length)
+            details += '<b>Request ID: </b>' + htmlEncode(r['request_id']) + '<br>';
         if (r['client_port'] !== undefined && r['client_port'] !== null && r['client_port'])
             details += '<b>Client Port: </b>' + htmlEncode(r['client_port']) + '<br>';
+        if (r['created'] !== undefined)
+            details += '<b>Discovered: </b>' + (r['created'] / 1000.0).toFixed(3) + ' s<br>';
         if (r['load_start'] !== undefined)
             details += '<b>Request Start: </b>' + (r['load_start'] / 1000.0).toFixed(3) + ' s<br>';
         if (IsValidDuration(r['dns_ms'])) {
@@ -157,17 +163,12 @@ function SelectRequest(step, request) {
             details += '<b>Content Download: </b>' + htmlEncode(r['download_ms']) + ' ms<br>';
         if (r['bytesIn'] !== undefined)
             details += '<b>Bytes In (downloaded): </b>' + NumBytesAsDisplayString(r['bytesIn']) + '<br>';
+        if (r['objectSizeUncompressed'] !== undefined)
+            details += '<b>Uncompressed Size: </b>' + NumBytesAsDisplayString(r['objectSizeUncompressed']) + '<br>';
         if (r['certificate_bytes'] !== undefined && r['certificate_bytes'] > 0)
             details += '<b>Certificates (downloaded): </b>' + r['certificate_bytes'] + ' B<br>';
         if (r['bytesOut'] !== undefined)
             details += '<b>Bytes Out (uploaded): </b>' + NumBytesAsDisplayString(r['bytesOut']) + '<br>';
-        if (r['custom_rules'] !== undefined) {
-            for (rule in r['custom_rules']) {
-                details += '<b>Custom Rule - ' + htmlEncode(rule) + ': </b>(';
-                details += htmlEncode(r['custom_rules'][rule]['count']) + ' matches) - ';
-                details += htmlEncode(r['custom_rules'][rule]['value']) + '<br>';
-            }
-        }
         var psPageData = wptPageData[stepLabel] !== undefined ? wptPageData[stepLabel]['psPageData'] : undefined;
         if (psPageData !== undefined &&
             psPageData['connections'] !== undefined &&
@@ -230,6 +231,7 @@ function SelectRequest(step, request) {
     $("#request-details-" + stepLabel).html(details);
     $("#request-headers-" + stepLabel).html(requestHeaders);
     $("#response-headers-" + stepLabel).html(responseHeaders);
+    $("#request-raw-details-json-" + stepLabel).text(json);
     $('#request-dialog-' + stepLabel).jqmShow();
 
     // highlight the selected request

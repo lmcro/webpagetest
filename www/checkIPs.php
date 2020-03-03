@@ -40,7 +40,7 @@ for ($offset = 0; $offset <= $days; $offset++) {
           if (array_key_exists(14, $parts))
             $count = intval(trim($parts[14]));
           $count = max(1, $count);
-          if( ($privateInstall || $admin) && strlen($key) && $key != $keys['server']['key'] ) {
+          if( ($admin) && strlen($key) && $key != $keys['server']['key'] ) {
             if (!isset($users[$ip]))
               $users[$ip] = array();
             if (!in_array($key, $users[$ip]))
@@ -69,7 +69,7 @@ for ($offset = 0; $offset <= $days; $offset++) {
 // sort the counts descending
 arsort($counts);
 
-$title = 'WebPagetest - Check IPs';
+$title = 'WebPageTest - Check IPs';
 include 'admin_header.inc';
 
 echo '<table class="table"><tr><th>Total</th>';
@@ -133,7 +133,7 @@ function IPBlocked($ip) {
   if (isset($blockIps) && is_array($blockIps) && count($blockIps)) {
     foreach( $blockIps as $block ) {
       $block = trim($block);
-      if (strlen($block) && preg_match($block, $ip)) {
+      if (strlen($block) && preg_match("/$block/", $ip)) {
         $blocked = true;
         break;
       }

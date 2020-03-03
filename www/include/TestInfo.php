@@ -17,7 +17,7 @@ class TestInfo {
   }
 
   /**
-   * @param string $id The test id
+   * @param string $id The test ID
    * @param string $rootDirectory The root directory of the test data
    * @param array $testInfo Array with information about the test
    * @return TestInfo The created instance
@@ -35,7 +35,10 @@ class TestInfo {
         touch($iniPath);
     }
     $test["testinfo"] = GetTestInfo($rootDirectory);
-    return new self($test['testinfo']["id"], $rootDirectory, $test);
+    if (isset($test) && is_array($test) && isset($test['testinfo']["id"]))
+      return new self($test['testinfo']["id"], $rootDirectory, $test);
+    else
+      return new self('010101_0_0', $rootDirectory, $test);
   }
 
   /**
@@ -57,6 +60,14 @@ class TestInfo {
    */
   public function getRuns() {
     return empty($this->rawData['test']['runs']) ? 0 : $this->rawData['test']['runs'];
+  }
+
+  /**
+   * @return string The type of the test
+   */
+  public function getTestType() {
+    $type = isset($this->rawData['testinfo']['type']) ? $this->rawData['testinfo']['type'] : '';
+    return $type;
   }
 
   /**
@@ -129,6 +140,13 @@ class TestInfo {
    */
   public function getSteps() {
     return empty($this->rawData['testinfo']['steps']) ? 1 : $this->rawData['testinfo']['steps'];
+  }
+
+  /**
+   * @return int The configured latency for the test
+   */
+  public function getLatency() {
+    return empty($this->rawData['testinfo']['latency']) ? null : $this->rawData['testinfo']['latency'];
   }
 
   /**
@@ -205,6 +223,9 @@ class TestInfo {
    * @return bool True if the test is supposed to have a timeline, false otherwise
    */
   public function hasTimeline() {
-    return !empty($this->rawData["testinfo"]["timeline"]);
+    $ret = !empty($this->rawData["testinfo"]["timeline"]);
+    if ($ret && !empty($this->rawData["testinfo"]["discard_timeline"]))
+      $ret = false;
+    return $ret;
   }
 }

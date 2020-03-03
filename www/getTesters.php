@@ -1,6 +1,12 @@
 <?php
 
 include 'common.inc';
+if (isset($_REQUEST['k'])) {
+  $keys = parse_ini_file(__DIR__ . '/settings/keys.ini', true);
+  if (isset($keys['server']['key']) && $_REQUEST['k'] == $keys['server']['key']) {
+    $admin = true;
+  }
+}
 $remote_cache = array();
 if ($CURL_CONTEXT !== false) {
   curl_setopt($CURL_CONTEXT, CURLOPT_CONNECTTIMEOUT, 30);
@@ -8,7 +14,7 @@ if ($CURL_CONTEXT !== false) {
 }
 
 // load the locations
-$locations = GetAllTesters();
+$locations = GetAllTesters($admin);
 
 // kick out the data
 if( array_key_exists('f', $_REQUEST) && $_REQUEST['f'] == 'json' ) {
@@ -19,7 +25,7 @@ if( array_key_exists('f', $_REQUEST) && $_REQUEST['f'] == 'json' ) {
   json_response($ret);
 } elseif( array_key_exists('f', $_REQUEST) && $_REQUEST['f'] == 'html' ) {
   $refresh = 240;
-  $title = 'WebPagetest - Tester Status';
+  $title = 'WebPageTest - Tester Status';
   include 'admin_header.inc';
   echo "<table class=\"table\">\n";
   foreach( $locations as $name => &$location ) {
@@ -32,31 +38,47 @@ if( array_key_exists('f', $_REQUEST) && $_REQUEST['f'] == 'json' ) {
     }
     echo "<tr id=\"$name\"><th class=\"header$error\" colspan=\"16\">" . htmlspecialchars($name) . "$elapsed</th></tr>\n";
     if (array_key_exists('testers', $location)) {
-      echo "<tr><th class=\"tester\">Tester</th><th>Busy?</th><th>Last Check (minutes)</th><th>Last Work (minutes)</th><th>Version</th><th>PC</th><th>EC2 Instance</th><th>CPU Utilization</th><th>Error Rate</th><th>Free Disk (GB)</th><th>Screen Size</th>";
-      echo "<th>IE Version</th><th>Windows Version</th><th>GPU?</th><th>IP</th><th>DNS Server(s)</th></tr>\n";
+      echo "<tr><th class=\"tester\">Tester</th><th>Busy?</th><th>Last Check (minutes)</th><th>Last Work (minutes)</th><th>Version</th><th>PC</th><th>EC2 Instance</th><th>CPU Utilization</th><th>Error Rate</th><th>Free Disk (GB)</th><th>uptime (minutes)</th><th>Screen Size</th>";
+      echo "<th>IP</th><th>DNS Server(s)</th>";
+      if ($admin) {
+        echo "<th>Current Test</th>";
+      }
+      echo "</tr>\n";
       $count = 0;
+      $lastPC = null;
       foreach($location['testers'] as $tester) {
         $count++;
-        echo "<tr><td class=\"tester\">$count</td>";
-        echo "<td>" . @htmlspecialchars($tester['busy']) . "</td>";
-        echo "<td>" . @htmlspecialchars($tester['elapsed']) . "</td>";
-        echo "<td>" . @htmlspecialchars($tester['last']) . "</td>";
-        echo "<td>" . @htmlspecialchars($tester['version']) . "</td>";
-        echo "<td>" . @htmlspecialchars($tester['pc']) . "</td>";
-        echo "<td>" . @htmlspecialchars($tester['ec2']) . "</td>";
-        echo "<td>" . @htmlspecialchars($tester['cpu']) . "</td>";
-        echo "<td>" . @htmlspecialchars($tester['errors']) . "</td>";
-        echo "<td>" . @htmlspecialchars($tester['freedisk']) . "</td>";
-        if (empty($tester['screenwidth']) || empty($tester['screenwidth'])) {
-          echo "<td></td>";
-        } else {
-          echo "<td>" . @htmlspecialchars($tester['screenwidth']) . "x" . @htmlspecialchars($tester['screenheight']) . "</td>";
+        $style = '';
+        if (isset($tester['pc'])) {
+          if (preg_match('/^VM([0-9A-Za-z][0-9A-Za-z])-([0-9A-Za-z][0-9A-Za-z])/', $tester['pc'], $matches)) {
+            $pc = intval($matches[2]);
+            if (isset($lastPC) && $pc !== ($lastPC + 1)) {
+              $style = ' style="background-color:#ffffb3;"';
+            }
+            $lastPC = $pc;
+          }
         }
-        echo "<td>" . @htmlspecialchars($tester['ie']) . "</td>";
-        echo "<td>" . @htmlspecialchars($tester['winver']) . "</td>";
-        echo "<td>" . @htmlspecialchars($tester['GPU']) . "</td>";
-        echo "<td>" . @htmlspecialchars($tester['ip']) . "</td>";
-        echo "<td>" . @htmlspecialchars($tester['dns']) . "</td>";
+        echo "<tr$style><td nowrap class=\"tester\">$count</td>";
+        echo "<td nowrap>" . @htmlspecialchars($tester['busy']) . "</td>";
+        echo "<td nowrap>" . @htmlspecialchars($tester['elapsed']) . "</td>";
+        echo "<td nowrap>" . @htmlspecialchars($tester['last']) . "</td>";
+        echo "<td nowrap>" . @htmlspecialchars($tester['version']) . "</td>";
+        echo "<td nowrap>" . @htmlspecialchars($tester['pc']) . "</td>";
+        echo "<td nowrap>" . @htmlspecialchars($tester['ec2']) . "</td>";
+        echo "<td nowrap>" . @htmlspecialchars($tester['cpu']) . "</td>";
+        echo "<td nowrap>" . @htmlspecialchars($tester['errors']) . "</td>";
+        echo "<td nowrap>" . @htmlspecialchars($tester['freedisk']) . "</td>";
+        echo "<td nowrap>" . @htmlspecialchars($tester['upminutes']) . "</td>";
+        if (empty($tester['screenwidth']) || empty($tester['screenwidth'])) {
+          echo "<td nowrap></td>";
+        } else {
+          echo "<td nowrap>" . @htmlspecialchars($tester['screenwidth']) . "x" . @htmlspecialchars($tester['screenheight']) . "</td>";
+        }
+        echo "<td nowrap>" . @htmlspecialchars($tester['ip']) . "</td>";
+        echo "<td nowrap>" . @htmlspecialchars($tester['dns']) . "</td>";
+        if ($admin) {
+          echo "<td nowrap>" . @htmlspecialchars($tester['test']) . "</td>";
+        }
         echo "</tr>";
       }
     }
@@ -121,7 +143,7 @@ if( array_key_exists('f', $_REQUEST) && $_REQUEST['f'] == 'json' ) {
 * Load the location information and extract just the end nodes
 *
 */
-function GetAllTesters() {
+function GetAllTesters($include_sensitive = true) {
   $locations = array();
   $loc = LoadLocationsIni();
 
@@ -135,7 +157,7 @@ function GetAllTesters() {
   }
 
   BuildLocations($loc);
-  
+
   $i = 1;
   while (isset($loc['locations'][$i])) {
     $group = &$loc[$loc['locations'][$i]];
@@ -145,7 +167,7 @@ function GetAllTesters() {
           isset($loc[$group[$j]]['relayLocation']) && strlen($loc[$group[$j]]['relayLocation'])) {
         $locations[$loc[$group[$j]]['location']] = GetRemoteTesters($loc[$group[$j]]['relayServer'], $loc[$group[$j]]['relayLocation']);
       } else {
-        $locations[$loc[$group[$j]]['location']] = GetTesters($loc[$group[$j]]['location']);
+        $locations[$loc[$group[$j]]['location']] = GetTesters($loc[$group[$j]]['location'], false, $include_sensitive);
       }
 
       $j++;
@@ -153,7 +175,7 @@ function GetAllTesters() {
 
     $i++;
   }
-  
+
   return $locations;
 }
 

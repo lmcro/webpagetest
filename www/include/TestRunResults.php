@@ -45,11 +45,11 @@ class TestRunResults {
    * @param array $options Options for loading the TestStepData
    * @return TestRunResults|null The initialized object or null if it failed
    */
-  public static function fromFiles($testInfo, $runNumber, $isCached, $fileHandler = null, $options = null) {
+  public static function fromFiles($testInfo, $runNumber, $isCached, $fileHandler = null) {
     $stepResults = array();
     $isValid = false;
     for ($stepNumber = 1; $stepNumber <= $testInfo->stepsInRun($runNumber); $stepNumber++) {
-      $stepResult = TestStepResult::fromFiles($testInfo, $runNumber, $isCached, $stepNumber, $fileHandler, $options);
+      $stepResult = TestStepResult::fromFiles($testInfo, $runNumber, $isCached, $stepNumber, $fileHandler);
       $stepResults[] = $stepResult;
       $isValid = $isValid || ($stepResult !== null);
     }
@@ -269,7 +269,7 @@ class TestRunResults {
   }
 
   /**
-   * @return bool True if any step si optimization checked, false otherwise
+   * @return bool True if any step is  optimization-checked, false otherwise
    */
   public function isOptimizationChecked() {
     foreach ($this->stepResults as $stepResult) {
@@ -278,6 +278,20 @@ class TestRunResults {
       }
     }
     return false;
+  }
+
+  /**
+   * @return int lighthouse score
+   */
+  public function getLighthouseScore() {
+    $score = null;
+    foreach ($this->stepResults as $stepResult) {
+      $score = $stepResult->getMetric("lighthouse.ProgressiveWebApp");
+      if (isset($score)) {
+        return intval(($score * 100.0) + 0.5);
+      }
+    }
+    return $score;
   }
 
   public function hasBreakdownTimeline() {
